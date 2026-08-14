@@ -15,20 +15,11 @@ export default function Command() {
     <Form
       actions={
         <ActionPanel>
-          <Action.SubmitForm
-            title="Set Focus"
-            icon={Icon.Checkmark}
-            onSubmit={handleSubmit}
-          />
+          <Action.SubmitForm title="Set Focus" icon={Icon.Checkmark} onSubmit={handleSubmit} />
         </ActionPanel>
       }
     >
-      <Form.TextField
-        id="focus"
-        title="Focus"
-        placeholder="What deserves your attention?"
-        autoFocus
-      />
+      <Form.TextField id="focus" title="Focus" placeholder="What deserves your attention?" autoFocus />
     </Form>
   );
 }
