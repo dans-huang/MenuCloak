@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native-app:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build MenuCloak
+        run: ./build.sh
+      - name: Run self-test
+        run: ./MenuCloak.app/Contents/MacOS/MenuCloak --selftest
+      - name: Verify app signature
+        run: codesign --verify --deep --strict MenuCloak.app
+
+  raycast-extension:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: raycast-extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: raycast-extension/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
