@@ -36,15 +36,19 @@ Same overlay family as [MacTools](https://github.com/ggbond268/MacTools)' notch 
 unlike [TopNotch](https://topnotch.app/), which repaints the wallpaper (all-or-nothing —
 it can't leave the right side visible).
 
-## Build & run
+## Install
 
-MenuCloak is currently distributed from source. It requires the Xcode Command Line
-Tools and has been tested on macOS 26.
+Download the latest `MenuCloak.zip` from [GitHub Releases](https://github.com/dans-huang/MenuCloak/releases),
+unzip it, and move the app to `/Applications`. The current community build is ad-hoc
+signed rather than Apple-notarized, so macOS may require right-clicking the app and
+choosing **Open** the first time.
+
+To build from source instead, install the Xcode Command Line Tools and run:
 
 ```bash
 git clone https://github.com/dans-huang/MenuCloak.git
 cd MenuCloak
-./build.sh          # → MenuCloak.app
+./build.sh          # builds MenuCloak.app
 open MenuCloak.app
 ```
 
