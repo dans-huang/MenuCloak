@@ -92,7 +92,7 @@ Quit / toggle: open the app, or use its menu bar icon (◧). Note: if a menu bar
 - `MENUCLOAK_SPACE_LEVEL` env overrides the private space's absolute level
   (default 100) if a macOS update reshuffles space levels.
 
-## Known limits (ponytail ceilings)
+## Known Limitations
 
 - Primary display only. Upgrade path: one overlay per `NSScreen`.
 - Keyboard-opened menus reveal with up to 0.5s delay.
