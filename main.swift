@@ -30,6 +30,45 @@ enum FocusText {
     }
 }
 
+final class OverlayTextView: NSView {
+    var text = "" {
+        didSet {
+            needsDisplay = true
+            setAccessibilityValue(text)
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel("MenuCloak focus")
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .left
+        paragraph.lineBreakMode = .byTruncatingTail
+        let attributedText = NSAttributedString(string: text, attributes: [
+            .font: NSFont.menuBarFont(ofSize: 0),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.9),
+            .paragraphStyle: paragraph,
+        ])
+        let textHeight = ceil(attributedText.boundingRect(
+            with: .init(width: bounds.width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        ).height)
+        let textRect = NSRect(x: 0, y: floor((bounds.height - textHeight) / 2),
+                              width: bounds.width, height: textHeight)
+        attributedText.draw(with: textRect,
+                            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    }
+}
+
 enum MenuCloakURLAction: Equatable {
     case toggle
     case turnOn
@@ -229,7 +268,7 @@ if CommandLine.arguments.contains("--selftest") {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate {
     private static let enabledDefaultsKey = "MenuCloakEnabled"
     private var overlay: NSWindow!
-    private var focusLabel: NSTextField!
+    private var focusLabel: OverlayTextView!
     private var statusItem: NSStatusItem!
     private var statusToggleItem: NSMenuItem!
     private var controlWindow: NSWindow?
@@ -324,16 +363,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         w.ignoresMouseEvents = true
         w.alphaValue = 0
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        let label = NSTextField(labelWithString: "")
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = NSColor.white.withAlphaComponent(0.9)
-        label.alignment = .left
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-        label.cell?.usesSingleLineMode = true
-        label.cell?.truncatesLastVisibleLine = true
+        let label = OverlayTextView(frame: .zero)
         label.isHidden = true
-        label.setAccessibilityLabel("MenuCloak focus")
         w.contentView?.addSubview(label)
         w.orderFrontRegardless()
         overlay = w
@@ -591,12 +622,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let safeMaxX = screen.auxiliaryTopLeftArea?.maxX ?? overlayFrame.maxX
         let maxX = min(overlayFrame.maxX - padding, safeMaxX - padding)
         let minX = overlayFrame.minX + padding
-        let labelHeight: CGFloat = 18
         focusLabel.frame = .init(
             x: padding,
-            y: floor((barHeight - labelHeight) / 2),
+            y: 0,
             width: max(maxX - minX, 0),
-            height: labelHeight
+            height: barHeight
         )
     }
 
@@ -604,7 +634,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let text = persist ? focusTextStore.save(raw) : FocusText.displayText(raw)
         guard text != focusText else { return }
         focusText = text
-        focusLabel.stringValue = text
+        focusLabel.text = text
         focusLabel.toolTip = text.isEmpty ? nil : text
         focusLabel.isHidden = text.isEmpty
     }
