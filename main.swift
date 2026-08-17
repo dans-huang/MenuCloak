@@ -1425,6 +1425,8 @@ if CommandLine.arguments.contains("--selftest") {
         URLQueryItem(name: "state", value: "one"),
         URLQueryItem(name: "state", value: "two")
     ]) == nil)
+    precondition(GoogleCalendarCredentialsLoader.oauthClientID()?
+        .hasSuffix(".apps.googleusercontent.com") == true)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://toggle")!) == .toggle)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://on")!) == .turnOn)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://off")!) == .turnOff)

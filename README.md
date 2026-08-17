@@ -77,11 +77,11 @@ loopback callback, and the refresh token is stored in macOS Keychain. **Disconne
 that Keychain login immediately. Meeting reminders include the event location when present;
 for Workspace room bookings, MenuCloak falls back to the calendar resource's display name.
 
-Release builds need a Google OAuth **Desktop app** client ID bundled into the app. Set
-`MENUCLOAK_GOOGLE_CLIENT_ID` while building; the client ID is embedded in the built app but
-is not written back to the repository. The OAuth consent project must be External and In
-production for arbitrary Google accounts, and Google may require verification for the
-`calendar.readonly` scope.
+The repository bundles MenuCloak's public Google OAuth **Desktop app** client ID, so the
+standard installer can open Google sign-in without any local credentials file. Forks and
+developer builds can set `MENUCLOAK_GOOGLE_CLIENT_ID` to replace that client ID at build
+time. The OAuth consent project must be External and In production for arbitrary Google
+accounts, and Google may require verification for the `calendar.readonly` scope.
 
 Existing installations configured with the older local OAuth JSON continue to work. They
 can disconnect, and release builds configured with a Desktop client ID can connect again

@@ -17,6 +17,11 @@ plutil -insert ProgramArguments.1 -string --background "$PLIST"
 plutil -insert RunAtLoad -bool true "$PLIST"
 pkill -x MenuCloak 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/com.dans.menucloak" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+if ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
+  # launchd can briefly retain the previous job after bootout.
+  echo "menucloak: retrying login item registration"
+  sleep 1
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+fi
 echo "menucloak: installed app and login item"
 ./scripts/install-raycast-extension.sh

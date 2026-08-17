@@ -16,6 +16,8 @@
 	<string>MenuCloak</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.8</string>
+	<key>MenuCloakGoogleClientID</key>
+	<string>375162622442-tie9dbll3qe9em301jfe1anov5km4fqt.apps.googleusercontent.com</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
