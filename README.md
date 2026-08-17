@@ -84,17 +84,24 @@ copies credentials into the app or repository. Set
 
 `MenuCloak --selftest` runs the geometry checks.
 
-To install it in `/Applications` and start it at login:
+To install the complete MenuCloak setup in one pass — the app, login startup,
+and all five Raycast commands — run:
 
 ```bash
 ./install-launchagent.sh
 ```
 
+The installer uses the official Raycast Store listing once it is available and
+opens Raycast for the one required installation confirmation. While Store review
+is pending, it builds and installs the identical extension from this repository
+when Node.js and npm are available. Set `MENUCLOAK_RAYCAST_MODE=skip` if you do
+not use Raycast, or use `local` / `store` to force either installation path.
+
 ## Raycast
 
 The companion extension lets you set the focus text, toggle MenuCloak, and open its
-settings from Raycast. Until the Store submission is accepted, install it for local
-development with:
+settings from Raycast. It is included in the same repository and installed by
+`./install-launchagent.sh`. Extension development can still be run separately with:
 
 ```bash
 cd raycast-extension

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install MenuCloak in /Applications and start it quietly at login.
+# Install MenuCloak, its Raycast commands, and start the app quietly at login.
 # Uninstall: launchctl bootout gui/$(id -u)/com.dans.menucloak
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -18,4 +18,5 @@ plutil -insert RunAtLoad -bool true "$PLIST"
 pkill -x MenuCloak 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/com.dans.menucloak" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "installed: $PLIST"
+echo "menucloak: installed app and login item"
+./scripts/install-raycast-extension.sh
