@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="MenuCloak turns the left side of the macOS menu bar into a calm, persistent focus surface.">
+  <title>MenuCloak — A calmer macOS menu bar</title>
+  <link rel="icon" href="icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="./" aria-label="MenuCloak home">
+      <img src="icon.png" alt="">
+      <span>MenuCloak</span>
+    </a>
+    <nav class="nav" aria-label="Main navigation">
+      <a href="#calendar">Google Calendar</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="https://github.com/dans-huang/MenuCloak">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">A quiet place for what matters now</p>
+        <h1>Make the left side useful.</h1>
+        <p class="lede">MenuCloak covers the application menus you are not using and replaces them with one line of calm, persistent information.</p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/dans-huang/MenuCloak/releases">Download for macOS</a>
+          <a class="button" href="https://github.com/dans-huang/MenuCloak">View source</a>
+        </div>
+      </div>
+      <div class="menu-demo" role="img" aria-label="A Mac menu bar displaying a focus message on the left">
+        <div class="menu-bar">
+          <span class="apple">●</span>
+          <span class="focus-line">Mute the world and build your own.</span>
+          <span class="status-dots">● ●</span>
+        </div>
+        <p class="demo-note">Move the pointer over the cloak and the original app menus appear. The overlay itself is intentionally non-interactive.</p>
+      </div>
+    </section>
+
+    <section class="section">
+      <p class="eyebrow">Designed to stay out of your way</p>
+      <h2>Information, not another control panel.</h2>
+      <p class="section-intro">MenuCloak uses the space above your application for constant or ongoing information. It never takes over the status items, clock, or Control Center on the right.</p>
+      <div class="grid">
+        <article class="card">
+          <span class="card-number">01</span>
+          <h3>Write your own</h3>
+          <p>Keep a focus, intention, deadline, or short reminder visible while you work.</p>
+        </article>
+        <article class="card">
+          <span class="card-number">02</span>
+          <h3>Menus on demand</h3>
+          <p>Hover over the covered area and your normal application menus return immediately.</p>
+        </article>
+        <article class="card">
+          <span class="card-number">03</span>
+          <h3>Right side untouched</h3>
+          <p>Your existing menu bar apps remain where they are, without new crowding or rearrangement.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="calendar">
+      <p class="eyebrow">Optional Google Calendar connection</p>
+      <h2>Know what is next without checking.</h2>
+      <p class="section-intro">With your permission, MenuCloak reads upcoming events from your primary Google Calendar. A timed event can replace the focus line shortly before it starts, including its time and location. MenuCloak can also open a valid Google Meet link with a keyboard shortcut.</p>
+      <div class="privacy-callout">
+        <div>
+          <h3>Your calendar stays on your Mac.</h3>
+          <p>MenuCloak requests read-only Calendar access. OAuth credentials are stored in macOS Keychain, event data is processed locally, and MenuCloak does not operate a server that receives your calendar data.</p>
+        </div>
+        <a class="button" href="privacy.html">Read the privacy policy</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>MenuCloak is an open-source macOS utility by Dans Huang.</span>
+    <div class="footer-links">
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+      <a href="mailto:dd09153@gmail.com">Contact</a>
+    </div>
+  </footer>
+</body>
+</html>

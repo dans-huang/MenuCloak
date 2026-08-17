@@ -5,9 +5,28 @@ APP=MenuCloak.app
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
-GOOGLE_CLIENT_ID="${MENUCLOAK_GOOGLE_CLIENT_ID:-}"
+GOOGLE_OAUTH_CLIENT_JSON="${MENUCLOAK_GOOGLE_OAUTH_CLIENT_JSON:-}"
+if [ -n "$GOOGLE_OAUTH_CLIENT_JSON" ]; then
+  if [ ! -f "$GOOGLE_OAUTH_CLIENT_JSON" ]; then
+    echo "error: OAuth client JSON not found" >&2
+    exit 1
+  fi
+  GOOGLE_CLIENT_ID="$(plutil -extract installed.client_id raw -o - "$GOOGLE_OAUTH_CLIENT_JSON" 2>/dev/null || true)"
+  GOOGLE_CLIENT_SECRET="$(plutil -extract installed.client_secret raw -o - "$GOOGLE_OAUTH_CLIENT_JSON" 2>/dev/null || true)"
+  if [[ "$GOOGLE_CLIENT_ID" != *.apps.googleusercontent.com ]] || [ -z "$GOOGLE_CLIENT_SECRET" ]; then
+    echo "error: OAuth client JSON must contain an installed Desktop client ID and secret" >&2
+    exit 1
+  fi
+else
+  GOOGLE_CLIENT_ID="${MENUCLOAK_GOOGLE_CLIENT_ID:-}"
+  GOOGLE_CLIENT_SECRET="${MENUCLOAK_GOOGLE_CLIENT_SECRET:-}"
+fi
 if [ -n "$GOOGLE_CLIENT_ID" ]; then
   plutil -replace MenuCloakGoogleClientID -string "$GOOGLE_CLIENT_ID" "$APP/Contents/Info.plist"
+fi
+if [ -n "$GOOGLE_CLIENT_SECRET" ]; then
+  plutil -insert MenuCloakGoogleClientSecret -string "$GOOGLE_CLIENT_SECRET" "$APP/Contents/Info.plist" 2>/dev/null ||
+    plutil -replace MenuCloakGoogleClientSecret -string "$GOOGLE_CLIENT_SECRET" "$APP/Contents/Info.plist"
 fi
 BUNDLED_GOOGLE_CLIENT_ID="$(plutil -extract MenuCloakGoogleClientID raw -o - "$APP/Contents/Info.plist" 2>/dev/null || true)"
 if [[ "$BUNDLED_GOOGLE_CLIENT_ID" != *.apps.googleusercontent.com ]]; then
