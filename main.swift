@@ -12,8 +12,11 @@
 
 import AppKit
 import Carbon
+import CryptoKit
+import Darwin
 import Foundation
 import QuartzCore
+import Security
 import os.log
 
 enum Fade {
@@ -38,13 +41,33 @@ struct CalendarReminder: Equatable {
     let title: String
     let startDate: Date
     let endDate: Date
+    let location: String?
     let meetURL: URL?
 
-    init(title: String, startDate: Date, endDate: Date, meetURL: URL? = nil) {
+    init(title: String, startDate: Date, endDate: Date, location: String? = nil,
+         meetURL: URL? = nil) {
         self.title = title
         self.startDate = startDate
         self.endDate = endDate
+        self.location = location
         self.meetURL = meetURL
+    }
+}
+
+enum CalendarLocation {
+    static func displayText(eventLocation: String?, resourceNames: [String?]) -> String? {
+        let explicitLocation = FocusText.displayText(eventLocation ?? "")
+        if !explicitLocation.isEmpty {
+            return explicitLocation
+        }
+
+        var seen = Set<String>()
+        let rooms = resourceNames.compactMap { rawName -> String? in
+            let room = FocusText.displayText(rawName ?? "")
+            guard !room.isEmpty, seen.insert(room).inserted else { return nil }
+            return room
+        }
+        return rooms.isEmpty ? nil : rooms.joined(separator: ", ")
     }
 }
 
@@ -70,7 +93,10 @@ enum CalendarReminderLogic {
 
     static func displayText(_ reminders: [CalendarReminder],
                             timeText: (Date) -> String) -> String {
-        reminders.map { "\(timeText($0.startDate)) \($0.title)" }.joined(separator: "  ·  ")
+        reminders.map { reminder in
+            let locationText = reminder.location.map { " @ \($0)" } ?? ""
+            return "\(timeText(reminder.startDate)) \(reminder.title)\(locationText)"
+        }.joined(separator: "  ·  ")
     }
 
     static func meetURL(_ reminders: [CalendarReminder], now: Date) -> URL? {
@@ -92,9 +118,9 @@ enum GoogleMeetLink {
     }
 }
 
-private struct GoogleCalendarCredentials: Decodable {
+private struct GoogleCalendarCredentials: Codable, Equatable {
     let clientID: String
-    let clientSecret: String
+    let clientSecret: String?
     let refreshToken: String
 
     enum CodingKeys: String, CodingKey {
@@ -107,10 +133,531 @@ private struct GoogleCalendarCredentials: Decodable {
 private struct GoogleOAuthTokenResponse: Decodable {
     let accessToken: String
     let expiresIn: TimeInterval
+    let refreshToken: String?
+    let scope: String?
 
     enum CodingKeys: String, CodingKey {
         case accessToken = "access_token"
         case expiresIn = "expires_in"
+        case refreshToken = "refresh_token"
+        case scope
+    }
+}
+
+private enum GoogleCalendarCredentialStoreError: LocalizedError {
+    case keychain(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .keychain(let status):
+            let detail = SecCopyErrorMessageString(status, nil) as String? ?? "status \(status)"
+            return "Could not update Google Calendar login in Keychain (\(detail))"
+        }
+    }
+}
+
+private enum GoogleCalendarCredentialStore {
+    static let service = "com.dans.menucloak.google-calendar"
+    static let account = "oauth"
+    static let ignoreLegacyDefaultsKey = "MenuCloakIgnoreLegacyGoogleCredentials"
+
+    static func load() -> GoogleCalendarCredentials? {
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else { return nil }
+        return try? JSONDecoder().decode(GoogleCalendarCredentials.self, from: data)
+    }
+
+    static func save(_ credentials: GoogleCalendarCredentials) throws {
+        let data = try JSONEncoder().encode(credentials)
+        var status = SecItemUpdate(baseQuery as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var query = baseQuery
+            query[kSecValueData as String] = data
+            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            status = SecItemAdd(query as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            throw GoogleCalendarCredentialStoreError.keychain(status)
+        }
+    }
+
+    static func delete() throws {
+        let status = SecItemDelete(baseQuery as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw GoogleCalendarCredentialStoreError.keychain(status)
+        }
+    }
+
+    private static var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+    }
+}
+
+private enum GoogleCalendarCredentialSource {
+    case keychain
+    case legacyFile
+}
+
+private enum GoogleCalendarCredentialsLoader {
+    static func credentialsURL() -> URL {
+        if let configured = ProcessInfo.processInfo.environment["MENUCLOAK_GOOGLE_CREDENTIALS"],
+           !configured.isEmpty {
+            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/menucloak/google-calendar.json")
+    }
+
+    static func legacyCredentials() -> GoogleCalendarCredentials? {
+        guard let data = try? Data(contentsOf: credentialsURL()),
+              let credentials = try? JSONDecoder().decode(GoogleCalendarCredentials.self, from: data),
+              !credentials.clientID.isEmpty,
+              !credentials.refreshToken.isEmpty else { return nil }
+        return credentials
+    }
+
+    static func load() throws -> (GoogleCalendarCredentials, GoogleCalendarCredentialSource) {
+        if let credentials = GoogleCalendarCredentialStore.load() {
+            return (credentials, .keychain)
+        }
+        if !UserDefaults.standard.bool(forKey: GoogleCalendarCredentialStore.ignoreLegacyDefaultsKey),
+           let credentials = legacyCredentials() {
+            return (credentials, .legacyFile)
+        }
+        throw GoogleCalendarClientError.missingCredentials(credentialsURL().path)
+    }
+
+    static func oauthClientID() -> String? {
+        if let configured = ProcessInfo.processInfo.environment["MENUCLOAK_GOOGLE_CLIENT_ID"],
+           !configured.isEmpty { return configured }
+        if let bundled = Bundle.main.object(forInfoDictionaryKey: "MenuCloakGoogleClientID") as? String,
+           !bundled.isEmpty { return bundled }
+        return nil
+    }
+}
+
+private enum GoogleCalendarConnectionState: Equatable {
+    case disconnected
+    case connecting
+    case validating
+    case connected
+    case connectedLegacy
+    case error(String)
+}
+
+private enum GoogleOAuthError: LocalizedError {
+    case missingClientID
+    case listener
+    case cancelled
+    case invalidCallback
+    case stateMismatch
+    case denied(String)
+    case missingRefreshToken
+    case missingScope
+    case malformedResponse
+    case http(Int, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingClientID:
+            return "This build is missing its Google OAuth client ID"
+        case .listener:
+            return "MenuCloak could not start the local Google sign-in callback"
+        case .cancelled:
+            return "Google Calendar sign-in was cancelled"
+        case .invalidCallback:
+            return "Google returned an invalid sign-in callback"
+        case .stateMismatch:
+            return "Google sign-in could not be verified; please try again"
+        case .denied(let reason):
+            return reason == "access_denied"
+                ? "Google Calendar access was not granted"
+                : "Google sign-in failed (\(reason))"
+        case .missingRefreshToken:
+            return "Google did not return a reusable login; please try again"
+        case .missingScope:
+            return "Google Calendar read access was not granted"
+        case .malformedResponse:
+            return "Google returned an unreadable sign-in response"
+        case .http(let status, let detail):
+            return detail.isEmpty
+                ? "Google sign-in failed with HTTP \(status)"
+                : "Google sign-in failed: \(detail)"
+        }
+    }
+}
+
+private enum GoogleOAuthPKCE {
+    static func randomURLSafeString(byteCount: Int) -> String? {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            return nil
+        }
+        return Data(bytes).base64URLEncodedString()
+    }
+
+    static func challenge(for verifier: String) -> String {
+        Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncodedString()
+    }
+}
+
+private extension Data {
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+private final class GoogleOAuthLoopbackServer {
+    private static let maximumRequestSize = 16_384
+    private let queue = DispatchQueue(label: "com.dans.menucloak.google-oauth-loopback")
+    private var listenerFD: Int32 = -1
+    private var source: DispatchSourceRead?
+    private var completion: ((Result<URL, Error>) -> Void)?
+
+    deinit { cancel() }
+
+    func start(completion: @escaping (Result<URL, Error>) -> Void) throws -> URL {
+        let listenerFD = socket(AF_INET, SOCK_STREAM, 0)
+        guard listenerFD >= 0 else { throw GoogleOAuthError.listener }
+
+        var reuse: Int32 = 1
+        setsockopt(listenerFD, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                   socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let bindResult = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listenerFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0, listen(listenerFD, 1) == 0 else {
+            Darwin.close(listenerFD)
+            throw GoogleOAuthError.listener
+        }
+
+        var actualAddress = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &actualAddress) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(listenerFD, $0, &length)
+            }
+        }
+        guard nameResult == 0 else {
+            Darwin.close(listenerFD)
+            throw GoogleOAuthError.listener
+        }
+        let port = UInt16(bigEndian: actualAddress.sin_port)
+        guard let redirectURL = URL(string: "http://127.0.0.1:\(port)/oauth2callback") else {
+            Darwin.close(listenerFD)
+            throw GoogleOAuthError.listener
+        }
+
+        let source = DispatchSource.makeReadSource(fileDescriptor: listenerFD, queue: queue)
+        source.setEventHandler { [weak self] in self?.acceptCallback() }
+        source.setCancelHandler { Darwin.close(listenerFD) }
+        queue.sync {
+            self.listenerFD = listenerFD
+            self.completion = completion
+            self.source = source
+        }
+        source.resume()
+        return redirectURL
+    }
+
+    func cancel() {
+        queue.sync {
+            completion = nil
+            listenerFD = -1
+            source?.cancel()
+            source = nil
+        }
+    }
+
+    private func acceptCallback() {
+        let clientFD = accept(listenerFD, nil, nil)
+        guard clientFD >= 0 else { return }
+        defer { Darwin.close(clientFD) }
+
+        var noSigPipe: Int32 = 1
+        setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                   socklen_t(MemoryLayout<Int32>.size))
+        var receiveTimeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout,
+                   socklen_t(MemoryLayout<timeval>.size))
+
+        guard let request = readRequest(from: clientFD),
+              let firstLine = request.components(separatedBy: "\r\n").first,
+              firstLine.hasPrefix("GET "),
+              let path = firstLine.split(separator: " ", maxSplits: 2).dropFirst().first,
+              let callbackURL = URL(string: "http://127.0.0.1\(path)") else {
+            respond(clientFD, success: false)
+            complete(.failure(GoogleOAuthError.invalidCallback))
+            return
+        }
+        respond(clientFD, success: true)
+        complete(.success(callbackURL))
+    }
+
+    private func readRequest(from clientFD: Int32) -> String? {
+        var requestData = Data()
+        let headerTerminator = Data("\r\n\r\n".utf8)
+        var buffer = [UInt8](repeating: 0, count: 2_048)
+        while requestData.count < Self.maximumRequestSize {
+            let remaining = Self.maximumRequestSize - requestData.count
+            let count = recv(clientFD, &buffer, min(buffer.count, remaining), 0)
+            guard count > 0 else { return nil }
+            requestData.append(buffer, count: count)
+            if requestData.range(of: headerTerminator) != nil {
+                return String(data: requestData, encoding: .utf8)
+            }
+        }
+        return nil
+    }
+
+    private func respond(_ clientFD: Int32, success: Bool) {
+        let message = success
+            ? "Google sign-in returned to MenuCloak. You can close this tab and return to the app."
+            : "Google Calendar sign-in failed. Return to MenuCloak and try again."
+        let body = """
+        <!doctype html><html><head><meta charset="utf-8"><title>MenuCloak</title></head>
+        <body style="font:16px -apple-system;padding:48px;background:#111;color:#fff">
+        <h1 style="font-size:24px">MenuCloak</h1><p>\(message)</p></body></html>
+        """
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        _ = response.withCString { send(clientFD, $0, strlen($0), 0) }
+    }
+
+    private func complete(_ result: Result<URL, Error>) {
+        let callback = completion
+        completion = nil
+        listenerFD = -1
+        source?.cancel()
+        source = nil
+        DispatchQueue.main.async { callback?(result) }
+    }
+}
+
+private final class GoogleOAuthController {
+    static let calendarScope = "https://www.googleapis.com/auth/calendar.readonly"
+
+    private let session = URLSession(configuration: .ephemeral)
+    private var server: GoogleOAuthLoopbackServer?
+    private var timeout: DispatchWorkItem?
+    private var tokenTask: URLSessionDataTask?
+    private var attemptID: UUID?
+    private var completion: ((Result<GoogleCalendarCredentials, Error>) -> Void)?
+
+    deinit {
+        cancel(silently: true)
+        session.invalidateAndCancel()
+    }
+
+    func connect(completion: @escaping (Result<GoogleCalendarCredentials, Error>) -> Void) {
+        cancel(silently: true)
+        guard let clientID = GoogleCalendarCredentialsLoader.oauthClientID() else {
+            completion(.failure(GoogleOAuthError.missingClientID))
+            return
+        }
+        guard let verifier = GoogleOAuthPKCE.randomURLSafeString(byteCount: 48),
+              let state = GoogleOAuthPKCE.randomURLSafeString(byteCount: 24) else {
+            completion(.failure(GoogleOAuthError.listener))
+            return
+        }
+
+        let attemptID = UUID()
+        self.attemptID = attemptID
+        self.completion = completion
+        let server = GoogleOAuthLoopbackServer()
+        do {
+            var redirectURL: URL!
+            redirectURL = try server.start { [weak self] result in
+                self?.handleCallback(result, clientID: clientID, verifier: verifier,
+                                     state: state, redirectURL: redirectURL,
+                                     attemptID: attemptID)
+            }
+            self.server = server
+            guard let authorizationURL = Self.authorizationURL(
+                clientID: clientID,
+                redirectURL: redirectURL,
+                state: state,
+                challenge: GoogleOAuthPKCE.challenge(for: verifier)
+            ) else {
+                finish(.failure(GoogleOAuthError.malformedResponse), attemptID: attemptID)
+                return
+            }
+            let timeout = DispatchWorkItem { [weak self] in
+                self?.finish(.failure(GoogleOAuthError.cancelled), attemptID: attemptID)
+            }
+            self.timeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5 * 60, execute: timeout)
+            if !NSWorkspace.shared.open(authorizationURL) {
+                finish(.failure(GoogleOAuthError.cancelled), attemptID: attemptID)
+            }
+        } catch {
+            finish(.failure(error), attemptID: attemptID)
+        }
+    }
+
+    func cancel(silently: Bool = false) {
+        guard completion != nil || server != nil else { return }
+        if silently {
+            timeout?.cancel()
+            timeout = nil
+            tokenTask?.cancel()
+            tokenTask = nil
+            server?.cancel()
+            server = nil
+            attemptID = nil
+            completion = nil
+        } else {
+            guard let attemptID else { return }
+            finish(.failure(GoogleOAuthError.cancelled), attemptID: attemptID)
+        }
+    }
+
+    static func authorizationURL(clientID: String, redirectURL: URL,
+                                 state: String, challenge: String) -> URL? {
+        var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")
+        components?.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "redirect_uri", value: redirectURL.absoluteString),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "scope", value: calendarScope),
+            URLQueryItem(name: "access_type", value: "offline"),
+            URLQueryItem(name: "prompt", value: "consent"),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "state", value: state)
+        ]
+        return components?.url
+    }
+
+    static func uniqueQueryValues(_ queryItems: [URLQueryItem]?) -> [String: String]? {
+        var values: [String: String] = [:]
+        for item in queryItems ?? [] {
+            guard values[item.name] == nil else { return nil }
+            values[item.name] = item.value ?? ""
+        }
+        return values
+    }
+
+    private func handleCallback(_ result: Result<URL, Error>, clientID: String,
+                                verifier: String, state: String, redirectURL: URL,
+                                attemptID: UUID) {
+        guard self.attemptID == attemptID else { return }
+        switch result {
+        case .failure(let error):
+            finish(.failure(error), attemptID: attemptID)
+        case .success(let url):
+            guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                finish(.failure(GoogleOAuthError.invalidCallback), attemptID: attemptID)
+                return
+            }
+            guard let values = Self.uniqueQueryValues(components.queryItems) else {
+                finish(.failure(GoogleOAuthError.invalidCallback), attemptID: attemptID)
+                return
+            }
+            guard values["state"] == state else {
+                finish(.failure(GoogleOAuthError.stateMismatch), attemptID: attemptID)
+                return
+            }
+            if let error = values["error"], !error.isEmpty {
+                finish(.failure(GoogleOAuthError.denied(error)), attemptID: attemptID)
+                return
+            }
+            guard let code = values["code"], !code.isEmpty else {
+                finish(.failure(GoogleOAuthError.invalidCallback), attemptID: attemptID)
+                return
+            }
+            exchange(code: code, clientID: clientID, verifier: verifier,
+                     redirectURL: redirectURL, attemptID: attemptID)
+        }
+    }
+
+    private func exchange(code: String, clientID: String, verifier: String,
+                          redirectURL: URL, attemptID: UUID) {
+        var form = URLComponents()
+        form.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "code", value: code),
+            URLQueryItem(name: "code_verifier", value: verifier),
+            URLQueryItem(name: "grant_type", value: "authorization_code"),
+            URLQueryItem(name: "redirect_uri", value: redirectURL.absoluteString)
+        ]
+        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = form.percentEncodedQuery?.data(using: .utf8)
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self, self.attemptID == attemptID else { return }
+                self.tokenTask = nil
+                if let error {
+                    self.finish(.failure(error), attemptID: attemptID)
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    self.finish(.failure(GoogleOAuthError.malformedResponse), attemptID: attemptID)
+                    return
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    let detail = data.flatMap {
+                        (try? JSONSerialization.jsonObject(with: $0) as? [String: Any])?["error_description"] as? String
+                    } ?? ""
+                    self.finish(.failure(GoogleOAuthError.http(http.statusCode, detail)),
+                                attemptID: attemptID)
+                    return
+                }
+                guard let data,
+                      let token = try? JSONDecoder().decode(GoogleOAuthTokenResponse.self, from: data),
+                      let refreshToken = token.refreshToken,
+                      !refreshToken.isEmpty else {
+                    self.finish(.failure(GoogleOAuthError.missingRefreshToken), attemptID: attemptID)
+                    return
+                }
+                let scopes = Set((token.scope ?? "").split(separator: " ").map(String.init))
+                guard scopes.contains(Self.calendarScope) else {
+                    self.finish(.failure(GoogleOAuthError.missingScope), attemptID: attemptID)
+                    return
+                }
+                self.finish(.success(GoogleCalendarCredentials(
+                    clientID: clientID,
+                    clientSecret: nil,
+                    refreshToken: refreshToken
+                )), attemptID: attemptID)
+            }
+        }
+        tokenTask = task
+        task.resume()
+    }
+
+    private func finish(_ result: Result<GoogleCalendarCredentials, Error>, attemptID: UUID) {
+        guard self.attemptID == attemptID else { return }
+        timeout?.cancel()
+        timeout = nil
+        tokenTask?.cancel()
+        tokenTask = nil
+        server?.cancel()
+        server = nil
+        let callback = completion
+        completion = nil
+        self.attemptID = nil
+        callback?(result)
     }
 }
 
@@ -126,10 +673,14 @@ private struct GoogleCalendarEvent: Decodable {
     struct Attendee: Decodable {
         let isSelf: Bool?
         let responseStatus: String?
+        let displayName: String?
+        let resource: Bool?
 
         enum CodingKeys: String, CodingKey {
             case isSelf = "self"
             case responseStatus
+            case displayName
+            case resource
         }
     }
 
@@ -144,6 +695,7 @@ private struct GoogleCalendarEvent: Decodable {
 
     let id: String
     let summary: String?
+    let location: String?
     let status: String?
     let start: DateValue
     let end: DateValue
@@ -172,8 +724,9 @@ private enum GoogleCalendarClientError: LocalizedError {
     }
 }
 
-final class CalendarMonitor {
+private final class CalendarMonitor {
     var onChange: (([CalendarReminder]) -> Void)?
+    var onConnectionStateChange: ((GoogleCalendarConnectionState) -> Void)?
 
     private let session = URLSession(configuration: .ephemeral)
     private var timer: Timer?
@@ -184,6 +737,13 @@ final class CalendarMonitor {
     private var lastFetchedReminders: [CalendarReminder] = []
     private var lastLoggedError = ""
     private var didLogConnection = false
+    private var credentialGeneration = 0
+    private(set) var connectionState: GoogleCalendarConnectionState = .disconnected {
+        didSet {
+            guard oldValue != connectionState else { return }
+            onConnectionStateChange?(connectionState)
+        }
+    }
 
     func start() {
         refresh()
@@ -198,6 +758,23 @@ final class CalendarMonitor {
         session.invalidateAndCancel()
     }
 
+    func credentialsDidChange() {
+        credentialGeneration += 1
+        accessToken = nil
+        accessTokenExpiry = .distantPast
+        lastFetchedReminders = []
+        didLogConnection = false
+        refresh()
+    }
+
+    func setConnecting() {
+        connectionState = .connecting
+    }
+
+    func setConnectionError(_ error: Error) {
+        connectionState = .error(error.localizedDescription)
+    }
+
     private func refresh() {
         let now = Date()
         onChange?(CalendarReminderLogic.activeOrUpcoming(lastFetchedReminders, now: now))
@@ -207,44 +784,33 @@ final class CalendarMonitor {
         }
         isLoading = true
         do {
-            let credentials = try loadCredentials()
-            ensureAccessToken(credentials: credentials) { [weak self] result in
+            let (credentials, source) = try GoogleCalendarCredentialsLoader.load()
+            let generation = credentialGeneration
+            if connectionState != .connected && connectionState != .connectedLegacy {
+                connectionState = .validating
+            }
+            ensureAccessToken(credentials: credentials, generation: generation) { [weak self] result in
                 guard let self else { return }
                 switch result {
                 case .success(let token):
-                    self.fetchEvents(token: token, credentials: credentials, now: now, canRetry: true)
+                    self.fetchEvents(token: token, credentials: credentials, source: source,
+                                     generation: generation, now: now, canRetry: true)
                 case .failure(let error):
                     self.finish(error: error)
                 }
             }
+        } catch GoogleCalendarClientError.missingCredentials {
+            connectionState = .disconnected
+            lastFetchedReminders = []
+            onChange?([])
+            finishLoading()
         } catch {
             finish(error: error)
         }
     }
 
-    private func credentialsURL() -> URL {
-        if let configured = ProcessInfo.processInfo.environment["MENUCLOAK_GOOGLE_CREDENTIALS"],
-           !configured.isEmpty {
-            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/menucloak/google-calendar.json")
-    }
-
-    private func loadCredentials() throws -> GoogleCalendarCredentials {
-        let url = credentialsURL()
-        guard let data = try? Data(contentsOf: url) else {
-            throw GoogleCalendarClientError.missingCredentials(url.path)
-        }
-        let credentials = try JSONDecoder().decode(GoogleCalendarCredentials.self, from: data)
-        guard !credentials.clientID.isEmpty, !credentials.clientSecret.isEmpty,
-              !credentials.refreshToken.isEmpty else {
-            throw GoogleCalendarClientError.invalidCredentials
-        }
-        return credentials
-    }
-
     private func ensureAccessToken(credentials: GoogleCalendarCredentials,
+                                   generation: Int,
                                    completion: @escaping (Result<String, Error>) -> Void) {
         if let accessToken, accessTokenExpiry.timeIntervalSinceNow > 60 {
             completion(.success(accessToken))
@@ -254,10 +820,12 @@ final class CalendarMonitor {
         var form = URLComponents()
         form.queryItems = [
             URLQueryItem(name: "client_id", value: credentials.clientID),
-            URLQueryItem(name: "client_secret", value: credentials.clientSecret),
             URLQueryItem(name: "refresh_token", value: credentials.refreshToken),
             URLQueryItem(name: "grant_type", value: "refresh_token")
         ]
+        if let clientSecret = credentials.clientSecret, !clientSecret.isEmpty {
+            form.queryItems?.append(URLQueryItem(name: "client_secret", value: clientSecret))
+        }
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -265,6 +833,10 @@ final class CalendarMonitor {
         session.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard generation == self.credentialGeneration else {
+                    self.finishLoading()
+                    return
+                }
                 if let error {
                     completion(.failure(error))
                     return
@@ -291,6 +863,8 @@ final class CalendarMonitor {
     }
 
     private func fetchEvents(token: String, credentials: GoogleCalendarCredentials,
+                             source: GoogleCalendarCredentialSource,
+                             generation: Int,
                              now: Date, canRetry: Bool) {
         var components = URLComponents(string: "https://www.googleapis.com/calendar/v3/calendars/primary/events")!
         components.queryItems = [
@@ -310,6 +884,10 @@ final class CalendarMonitor {
         session.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard generation == self.credentialGeneration else {
+                    self.finishLoading()
+                    return
+                }
                 if let error {
                     self.finish(error: error)
                     return
@@ -321,11 +899,12 @@ final class CalendarMonitor {
                 if http.statusCode == 401, canRetry {
                     self.accessToken = nil
                     self.accessTokenExpiry = .distantPast
-                    self.ensureAccessToken(credentials: credentials) { [weak self] result in
+                    self.ensureAccessToken(credentials: credentials, generation: generation) { [weak self] result in
                         guard let self else { return }
                         switch result {
                         case .success(let refreshedToken):
                             self.fetchEvents(token: refreshedToken, credentials: credentials,
+                                             source: source, generation: generation,
                                              now: now, canRetry: false)
                         case .failure(let error):
                             self.finish(error: error)
@@ -342,7 +921,8 @@ final class CalendarMonitor {
                     self.finish(error: GoogleCalendarClientError.malformedResponse)
                     return
                 }
-                self.finish(reminders: self.reminders(from: list.items ?? [], now: now))
+                self.finish(reminders: self.reminders(from: list.items ?? [], now: now),
+                            source: source)
             }
         }.resume()
     }
@@ -370,15 +950,21 @@ final class CalendarMonitor {
                 .first(where: { $0.entryPointType == "video" })
                 .flatMap { GoogleMeetLink.validated($0.uri) }
             let meetURL = conferenceURL ?? GoogleMeetLink.validated(event.hangoutLink)
+            let resourceNames = event.attendees?
+                .filter { $0.resource == true }
+                .map(\.displayName) ?? []
+            let location = CalendarLocation.displayText(eventLocation: event.location,
+                                                        resourceNames: resourceNames)
             return CalendarReminder(title: title, startDate: startDate, endDate: endDate,
-                                    meetURL: meetURL)
+                                    location: location, meetURL: meetURL)
         }
         return CalendarReminderLogic.activeOrUpcoming(reminders, now: now)
     }
 
-    private func finish(reminders: [CalendarReminder]) {
+    private func finish(reminders: [CalendarReminder], source: GoogleCalendarCredentialSource) {
         lastFetchedReminders = reminders
         lastLoggedError = ""
+        connectionState = source == .keychain ? .connected : .connectedLegacy
         if !didLogConnection {
             NSLog("MenuCloak Google Calendar: connected")
             didLogConnection = true
@@ -389,6 +975,7 @@ final class CalendarMonitor {
 
     private func finish(error: Error) {
         let message = error.localizedDescription
+        connectionState = .error(message)
         if message != lastLoggedError {
             NSLog("MenuCloak Google Calendar: %@", message)
             lastLoggedError = message
@@ -710,6 +1297,21 @@ enum Geometry {
     }
 }
 
+enum SystemOverview {
+    // Mission Control is rendered by Dock in a dedicated full-screen layer.
+    // Checking the Dock bundle ID as well as the layer avoids confusing it
+    // with normal full-screen app backdrops at other WindowServer levels.
+    static let missionControlLayer = 18
+
+    static func isMissionControlWindow(ownerBundleIdentifier: String?, layer: Int?,
+                                       frame: CGRect?) -> Bool {
+        guard ownerBundleIdentifier == "com.apple.dock",
+              layer == missionControlLayer,
+              let frame else { return false }
+        return frame.minX == 0 && frame.minY == 0 && frame.width > 0 && frame.height > 0
+    }
+}
+
 // --selftest: the one runnable check for the pure logic.
 if CommandLine.arguments.contains("--selftest") {
     precondition(Geometry.coverWidth(statusMinX: 900, screenWidth: 1512) == 900)
@@ -727,6 +1329,22 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(Geometry.isMenuBarPopup(frame: .init(x: 204, y: 107, width: 101, height: 53), barHeight: 30, coverWidth: 869))
     precondition(!Geometry.isMenuBarPopup(frame: .init(x: 676, y: 434, width: 111, height: 58), barHeight: 30, coverWidth: 869))
     precondition(!Geometry.isMenuBarPopup(frame: .init(x: 968, y: 30, width: 320, height: 718), barHeight: 30, coverWidth: 869))
+    precondition(SystemOverview.isMissionControlWindow(
+        ownerBundleIdentifier: "com.apple.dock", layer: 18,
+        frame: .init(x: 0, y: 0, width: 1352, height: 878)
+    ))
+    precondition(!SystemOverview.isMissionControlWindow(
+        ownerBundleIdentifier: "com.apple.dock", layer: 20,
+        frame: .init(x: 0, y: 0, width: 1352, height: 878)
+    ))
+    precondition(!SystemOverview.isMissionControlWindow(
+        ownerBundleIdentifier: "com.example.app", layer: 18,
+        frame: .init(x: 0, y: 0, width: 1352, height: 878)
+    ))
+    precondition(!SystemOverview.isMissionControlWindow(
+        ownerBundleIdentifier: "com.apple.dock", layer: 18,
+        frame: .init(x: 40, y: 40, width: 600, height: 400)
+    ))
     precondition(Fade.alpha(from: 1, to: 0, elapsed: 0) == 1)
     precondition(Fade.alpha(from: 1, to: 0, elapsed: 0.075) == 0.5)
     precondition(Fade.alpha(from: 1, to: 0, elapsed: 0.15) == 0)
@@ -734,11 +1352,20 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(LegacyOneThing.cacheFilename(inJournal: "other abc 1\nonething newest 4\n") == "newest")
     precondition(LegacyOneThing.cacheFilename(inJournal: "onething ../escape 1\n") == nil)
     precondition(FocusText.displayText("  Finish the project  \n today ") == "Finish the project today")
+    precondition(CalendarLocation.displayText(eventLocation: "  Room 602 \n East Wing ",
+                                              resourceNames: ["Ignored room"])
+        == "Room 602 East Wing")
+    precondition(CalendarLocation.displayText(eventLocation: nil,
+                                              resourceNames: [" Room 601 ", "Room 601", nil,
+                                                              "Room 602"])
+        == "Room 601, Room 602")
+    precondition(CalendarLocation.displayText(eventLocation: "  ", resourceNames: [nil]) == nil)
     let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
     let upcoming = CalendarReminder(title: "Design review", startDate: now.addingTimeInterval(15 * 60),
                                     endDate: now.addingTimeInterval(45 * 60))
     let overlapping = CalendarReminder(title: "Team sync", startDate: now.addingTimeInterval(10 * 60),
-                                       endDate: now.addingTimeInterval(40 * 60))
+                                       endDate: now.addingTimeInterval(40 * 60),
+                                       location: "Room 602")
     let tooFar = CalendarReminder(title: "Later", startDate: now.addingTimeInterval(15 * 60 + 1),
                                   endDate: now.addingTimeInterval(60 * 60))
     let recentlyStarted = CalendarReminder(title: "In progress",
@@ -755,7 +1382,7 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(CalendarReminderLogic.visible([noticeExpired, ended, tooFar], now: now).isEmpty)
     precondition(CalendarReminderLogic.displayText(visibleReminders, timeText: { date in
         date == overlapping.startDate ? "10:10" : "10:15"
-    }) == "10:10 Team sync  ·  10:15 Design review")
+    }) == "10:10 Team sync @ Room 602  ·  10:15 Design review")
     let meetURL = URL(string: "https://meet.google.com/abc-defg-hij")!
     let upcomingMeet = CalendarReminder(title: "Meet", startDate: upcoming.startDate,
                                         endDate: upcoming.endDate, meetURL: meetURL)
@@ -769,6 +1396,35 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(GoogleMeetLink.validated("https://meet.google.com.evil.example/abc") == nil)
     let userInfoURL = "https://user" + "@meet.google.com/abc"
     precondition(GoogleMeetLink.validated(userInfoURL) == nil)
+    let verifier = String(repeating: "a", count: 64)
+    let challenge = GoogleOAuthPKCE.challenge(for: verifier)
+    precondition(challenge.count == 43)
+    precondition(!challenge.contains("="))
+    let redirect = URL(string: "http://127.0.0.1:54321/oauth2callback")!
+    let authorizationURL = GoogleOAuthController.authorizationURL(
+        clientID: "test.apps.googleusercontent.com",
+        redirectURL: redirect,
+        state: "state",
+        challenge: challenge
+    )!
+    let authorizationItems = URLComponents(url: authorizationURL, resolvingAgainstBaseURL: false)!
+        .queryItems ?? []
+    let authorizationValues = Dictionary(uniqueKeysWithValues: authorizationItems.map {
+        ($0.name, $0.value ?? "")
+    })
+    precondition(authorizationValues["scope"] == GoogleOAuthController.calendarScope)
+    precondition(authorizationValues["redirect_uri"] == redirect.absoluteString)
+    precondition(authorizationValues["code_challenge_method"] == "S256")
+    precondition(authorizationValues["access_type"] == "offline")
+    precondition(authorizationValues["prompt"] == "consent")
+    precondition(GoogleOAuthController.uniqueQueryValues([
+        URLQueryItem(name: "state", value: "one"),
+        URLQueryItem(name: "code", value: "two")
+    ]) == ["state": "one", "code": "two"])
+    precondition(GoogleOAuthController.uniqueQueryValues([
+        URLQueryItem(name: "state", value: "one"),
+        URLQueryItem(name: "state", value: "two")
+    ]) == nil)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://toggle")!) == .toggle)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://on")!) == .turnOn)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://off")!) == .turnOff)
@@ -791,6 +1447,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var controlSwitch: NSSwitch?
     private var controlStateLabel: NSTextField?
     private var controlFocusField: NSTextField?
+    private var googleCalendarStateLabel: NSTextField?
+    private var googleCalendarButton: NSButton?
     private var timer: Timer?
     private var fadeTimer: Timer?
     // cover starts after the Apple-menu capsule so the  stays visible;
@@ -807,9 +1465,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var tickCount = 0
     private var missSince: Date?   // when probes started not seeing the menu bar
     private var lastHold = Date.distantPast
+    private var missionControlActive = false
     private let focusTextStore = FocusTextStore()
     private var focusText = ""
     private let calendarMonitor = CalendarMonitor()
+    private let googleOAuthController = GoogleOAuthController()
     private var calendarReminders: [CalendarReminder] = []
     private var activeCalendarReminders: [CalendarReminder] = []
     private var openMeetHotKey: GlobalHotKey?
@@ -832,7 +1492,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         ) { [weak self] _ in
             guard let self, self.enabled else { return }
             self.refreshAndLayout()
-            if self.menuBarH != nil, self.coverWidth != nil {
+            if !self.missionControlActive, self.menuBarH != nil, self.coverWidth != nil {
                 self.setCovered(true, animate: false)
             }
         }
@@ -841,6 +1501,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             guard let self else { return }
             self.activeCalendarReminders = reminders
             self.setCalendarReminders(CalendarReminderLogic.visible(reminders, now: Date()))
+        }
+        calendarMonitor.onConnectionStateChange = { [weak self] _ in
+            self?.updateGoogleCalendarControl()
         }
         calendarMonitor.start()
         openMeetHotKey = GlobalHotKey(
@@ -857,7 +1520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                    type: .info)
         }
         refreshAndLayout()
-        setCovered(enabled, animate: false)
+        setCovered(enabled && !missionControlActive, animate: false)
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
         if !backgroundLaunch { showControlWindow() }
@@ -977,10 +1640,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         updateControlState()
         if newValue {
             refreshAndLayout()
-            setCovered(true, animate: false)
+            setCovered(!missionControlActive, animate: false)
         } else {
             setCovered(false, animate: false)
         }
+    }
+
+    @objc private func googleCalendarButtonPressed(_ sender: NSButton) {
+        switch calendarMonitor.connectionState {
+        case .connected, .connectedLegacy:
+            googleOAuthController.cancel(silently: true)
+            do {
+                try GoogleCalendarCredentialStore.delete()
+                UserDefaults.standard.set(
+                    true,
+                    forKey: GoogleCalendarCredentialStore.ignoreLegacyDefaultsKey
+                )
+                calendarMonitor.credentialsDidChange()
+            } catch {
+                calendarMonitor.setConnectionError(error)
+            }
+        case .connecting:
+            googleOAuthController.cancel()
+            calendarMonitor.credentialsDidChange()
+        case .validating:
+            return
+        case .disconnected, .error:
+            calendarMonitor.setConnecting()
+            googleOAuthController.connect { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success(let credentials):
+                    do {
+                        try GoogleCalendarCredentialStore.save(credentials)
+                        UserDefaults.standard.set(
+                            true,
+                            forKey: GoogleCalendarCredentialStore.ignoreLegacyDefaultsKey
+                        )
+                        self.calendarMonitor.credentialsDidChange()
+                    } catch {
+                        self.calendarMonitor.setConnectionError(error)
+                    }
+                case .failure(let error):
+                    self.calendarMonitor.setConnectionError(error)
+                }
+            }
+        }
+        updateGoogleCalendarControl()
     }
 
     private func handle(_ url: URL) {
@@ -1008,6 +1714,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private func showControlWindow() {
         if controlWindow == nil { makeControlWindow() }
         updateControlState()
+        updateGoogleCalendarControl()
         NSApp.setActivationPolicy(.regular)
         controlWindow?.center()
         controlWindow?.makeKeyAndOrderFront(nil)
@@ -1016,7 +1723,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
 
     private func makeControlWindow() {
         let window = NSWindow(
-            contentRect: .init(x: 0, y: 0, width: 390, height: 260),
+            contentRect: .init(x: 0, y: 0, width: 390, height: 350),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -1025,26 +1732,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         window.isReleasedWhenClosed = false
         window.delegate = self
 
-        let content = NSView(frame: .init(x: 0, y: 0, width: 390, height: 260))
+        let content = NSView(frame: .init(x: 0, y: 0, width: 390, height: 350))
         window.contentView = content
 
         let title = NSTextField(labelWithString: "MenuCloak")
         title.font = .systemFont(ofSize: 22, weight: .semibold)
-        title.frame = .init(x: 28, y: 207, width: 330, height: 29)
+        title.frame = .init(x: 28, y: 297, width: 330, height: 29)
         content.addSubview(title)
 
         let detail = NSTextField(wrappingLabelWithString: "Keep one clear focus in the left side of your menu bar.")
         detail.textColor = .secondaryLabelColor
         detail.font = .systemFont(ofSize: 13)
-        detail.frame = .init(x: 28, y: 174, width: 330, height: 34)
+        detail.frame = .init(x: 28, y: 264, width: 330, height: 34)
         content.addSubview(detail)
 
         let focusTitle = NSTextField(labelWithString: "Focus text")
         focusTitle.font = .systemFont(ofSize: 13, weight: .medium)
-        focusTitle.frame = .init(x: 28, y: 145, width: 330, height: 20)
+        focusTitle.frame = .init(x: 28, y: 235, width: 330, height: 20)
         content.addSubview(focusTitle)
 
-        let focusField = NSTextField(frame: .init(x: 28, y: 110, width: 334, height: 28))
+        let focusField = NSTextField(frame: .init(x: 28, y: 200, width: 334, height: 28))
         focusField.placeholderString = "What deserves your attention?"
         focusField.stringValue = focusText
         focusField.delegate = self
@@ -1052,7 +1759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         content.addSubview(focusField)
         controlFocusField = focusField
 
-        let toggle = NSSwitch(frame: .init(x: 28, y: 56, width: 42, height: 24))
+        let toggle = NSSwitch(frame: .init(x: 28, y: 155, width: 42, height: 24))
         toggle.target = self
         toggle.action = #selector(controlSwitchChanged(_:))
         toggle.setAccessibilityLabel("Turn MenuCloak on or off")
@@ -1061,9 +1768,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
 
         let state = NSTextField(labelWithString: "")
         state.font = .systemFont(ofSize: 14, weight: .medium)
-        state.frame = .init(x: 84, y: 58, width: 275, height: 22)
+        state.frame = .init(x: 84, y: 157, width: 275, height: 22)
         content.addSubview(state)
         controlStateLabel = state
+
+        let separator = NSBox(frame: .init(x: 28, y: 132, width: 334, height: 1))
+        separator.boxType = .separator
+        content.addSubview(separator)
+
+        let calendarTitle = NSTextField(labelWithString: "Google Calendar")
+        calendarTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        calendarTitle.frame = .init(x: 28, y: 101, width: 200, height: 20)
+        content.addSubview(calendarTitle)
+
+        let calendarState = NSTextField(wrappingLabelWithString: "")
+        calendarState.font = .systemFont(ofSize: 12)
+        calendarState.textColor = .secondaryLabelColor
+        calendarState.frame = .init(x: 28, y: 58, width: 210, height: 38)
+        calendarState.setAccessibilityLabel("Google Calendar connection status")
+        content.addSubview(calendarState)
+        googleCalendarStateLabel = calendarState
+
+        let calendarButton = NSButton(
+            title: "Connect…",
+            target: self,
+            action: #selector(googleCalendarButtonPressed(_:))
+        )
+        calendarButton.bezelStyle = .rounded
+        calendarButton.frame = .init(x: 242, y: 67, width: 120, height: 30)
+        calendarButton.setAccessibilityLabel("Connect Google Calendar")
+        content.addSubview(calendarButton)
+        googleCalendarButton = calendarButton
 
         let quit = NSButton(title: "Quit MenuCloak", target: NSApp, action: #selector(NSApplication.terminate(_:)))
         quit.bezelStyle = .rounded
@@ -1078,6 +1813,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         controlStateLabel?.stringValue = enabled
             ? "On — menus are covered"
             : "Off — menus are visible"
+    }
+
+    private func updateGoogleCalendarControl() {
+        guard let stateLabel = googleCalendarStateLabel,
+              let button = googleCalendarButton else { return }
+        switch calendarMonitor.connectionState {
+        case .disconnected:
+            stateLabel.stringValue = "Not connected"
+            stateLabel.textColor = .secondaryLabelColor
+            button.title = "Connect…"
+            button.isEnabled = true
+            button.setAccessibilityLabel("Connect Google Calendar")
+        case .connecting:
+            stateLabel.stringValue = "Waiting for Google sign-in…"
+            stateLabel.textColor = .secondaryLabelColor
+            button.title = "Cancel"
+            button.isEnabled = true
+            button.setAccessibilityLabel("Cancel Google Calendar sign-in")
+        case .validating:
+            stateLabel.stringValue = "Checking connection…"
+            stateLabel.textColor = .secondaryLabelColor
+            button.title = "Checking…"
+            button.isEnabled = false
+            button.setAccessibilityLabel("Checking Google Calendar connection")
+        case .connected:
+            stateLabel.stringValue = "Connected securely with read-only access"
+            stateLabel.textColor = .secondaryLabelColor
+            button.title = "Disconnect"
+            button.isEnabled = true
+            button.setAccessibilityLabel("Disconnect Google Calendar")
+        case .connectedLegacy:
+            stateLabel.stringValue = "Connected using the existing local login"
+            stateLabel.textColor = .secondaryLabelColor
+            button.title = "Disconnect"
+            button.isEnabled = true
+            button.setAccessibilityLabel("Disconnect Google Calendar")
+        case .error(let message):
+            stateLabel.stringValue = message
+            stateLabel.textColor = .systemRed
+            button.title = "Try Again…"
+            button.isEnabled = true
+            button.setAccessibilityLabel("Try connecting Google Calendar again")
+        }
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -1097,7 +1875,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         (CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]]) ?? []
     }
 
-    private func refreshCoverWidth() {
+    private func isMissionControlActive(in infos: [[String: Any]]) -> Bool {
+        for info in infos {
+            guard (info[kCGWindowLayer as String] as? Int) == SystemOverview.missionControlLayer,
+                  let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds) else { continue }
+            let bundleIdentifier = NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier
+            if SystemOverview.isMissionControlWindow(
+                ownerBundleIdentifier: bundleIdentifier,
+                layer: SystemOverview.missionControlLayer,
+                frame: frame
+            ) { return true }
+        }
+        return false
+    }
+
+    private func refreshCoverWidth(in infos: [[String: Any]]) {
         guard let s = screen else { coverWidth = nil; menuBarH = nil; return }
         let statusLevel = Int(CGWindowLevelForKey(.statusWindow))
         let barLevel = Int(CGWindowLevelForKey(.mainMenuWindow))
@@ -1105,7 +1899,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let nativeBarH = s.frame.maxY - s.visibleFrame.maxY
         var minX: CGFloat?
         var barH: CGFloat?
-        for info in windowInfos() {
+        for info in infos {
             guard let layer = info[kCGWindowLayer as String] as? Int,
                   layer == statusLevel || layer == barLevel,
                   let bd = info[kCGWindowBounds as String] as? NSDictionary,
@@ -1151,7 +1945,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     // MARK: layout & state
 
     private func refreshAndLayout() {
-        refreshCoverWidth()
+        let infos = windowInfos()
+        missionControlActive = isMissionControlActive(in: infos)
+        refreshCoverWidth(in: infos)
         guard let s = screen, let cw = coverWidth, let bh = menuBarH, bh > 5 else { return }
         overlay.setFrame(.init(x: s.frame.minX + leftInset, y: s.frame.maxY - bh,
                                width: max(cw - leftInset, 0), height: bh), display: true)
@@ -1231,6 +2027,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         if tickCount % 3 == 0 {
             refreshAndLayout()
         }   // 0.3s probe cadence
+        if missionControlActive {
+            setCovered(false, animate: false)
+            return
+        }
         guard let bh = menuBarH, bh > 5, let cw = coverWidth else {
             // black by default: stay covered through transient probe gaps
             // (space-switch animations flap the window list for ≤0.4s);

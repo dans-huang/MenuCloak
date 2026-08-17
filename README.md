@@ -18,7 +18,9 @@ launch after upgrading from the earlier One Thing-powered version, MenuCloak imp
 the existing One Thing text once. It never reads One Thing again after that migration.
 
 MenuCloak can also read the primary Google Calendar directly through the Google Calendar
-API. A timed event replaces the focus text from 15 minutes before it starts until three
+API. Open MenuCloak and click **Connect…** to sign in with Google in your default browser.
+The reusable login is kept in macOS Keychain, and MenuCloak requests read-only Calendar
+access. A timed event replaces the focus text from 15 minutes before it starts until three
 minutes after it starts, with a slowly pulsing orange signal for attention. Overlapping and back-to-back events are
 combined in start-time order. All-day and declined events are ignored, and the saved
 focus text returns automatically when no event qualifies.
@@ -69,9 +71,22 @@ waiting quietly in the background and removes its Dock icon; opening the app aga
 brings the switch back. The setting is remembered across restarts. Login startup uses
 the `--background` flag so no window or Dock icon appears automatically.
 
-Google Calendar does not require Apple Calendar access or local Calendar syncing. Give
-MenuCloak a local OAuth JSON file containing `client_id`, `client_secret`, and
-`refresh_token` with the `calendar.readonly` scope:
+Google Calendar does not require Apple Calendar access or local Calendar syncing. Use the
+**Connect…** button in MenuCloak. Google opens in the default browser, returns to a local
+loopback callback, and the refresh token is stored in macOS Keychain. **Disconnect** removes
+that Keychain login immediately. Meeting reminders include the event location when present;
+for Workspace room bookings, MenuCloak falls back to the calendar resource's display name.
+
+Release builds need a Google OAuth **Desktop app** client ID bundled into the app. Set
+`MENUCLOAK_GOOGLE_CLIENT_ID` while building; the client ID is embedded in the built app but
+is not written back to the repository. The OAuth consent project must be External and In
+production for arbitrary Google accounts, and Google may require verification for the
+`calendar.readonly` scope.
+
+Existing installations configured with the older local OAuth JSON continue to work. They
+can disconnect, and release builds configured with a Desktop client ID can connect again
+through the app. The legacy helper accepts a JSON file containing `client_id`,
+`client_secret`, and `refresh_token`:
 
 ```bash
 ./configure-google-calendar.sh /absolute/path/to/google-oauth-token.json
@@ -118,6 +133,8 @@ Quit / toggle: open the app, or use its menu bar icon (◧). Note: if a menu bar
 - **Black by default.** The cover holds through desktop/Space switches — transient
   window-server gaps during switch animations (measured ≤0.4s) never uncover it;
   the cover snaps back instantly (no fade) the moment a switch lands.
+- Mission Control: the cover hides while the overview is open and returns as soon
+  as the overview closes.
 - Real fullscreen: cover yields ~1s after the menu bar is confirmed gone,
   re-covers within ~0.2s of leaving fullscreen.
 - `MENUCLOAK_SPACE_LEVEL` env overrides the private space's absolute level
