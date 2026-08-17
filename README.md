@@ -23,6 +23,10 @@ with a slowly pulsing orange signal for attention. Overlapping and back-to-back 
 combined in start-time order. All-day and declined events are ignored, and the saved
 focus text returns automatically when no event qualifies.
 
+Press **Command-Control-J** from any app to open the nearest qualifying event's
+Google Meet link in the default browser. If several meetings overlap, MenuCloak opens
+the earliest one that has a Meet link; if none has one, nothing happens.
+
 ## How it works
 
 A borderless, click-through black `NSWindow` at status-window level (25) — one level

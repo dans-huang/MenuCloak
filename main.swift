@@ -11,8 +11,10 @@
 // auto-hides there anyway). Upgrade path: one overlay per NSScreen.
 
 import AppKit
+import Carbon
 import Foundation
 import QuartzCore
+import os.log
 
 enum Fade {
     static let duration: TimeInterval = 0.15
@@ -36,6 +38,14 @@ struct CalendarReminder: Equatable {
     let title: String
     let startDate: Date
     let endDate: Date
+    let meetURL: URL?
+
+    init(title: String, startDate: Date, endDate: Date, meetURL: URL? = nil) {
+        self.title = title
+        self.startDate = startDate
+        self.endDate = endDate
+        self.meetURL = meetURL
+    }
 }
 
 enum CalendarReminderLogic {
@@ -54,6 +64,24 @@ enum CalendarReminderLogic {
     static func displayText(_ reminders: [CalendarReminder],
                             timeText: (Date) -> String) -> String {
         reminders.map { "\(timeText($0.startDate)) \($0.title)" }.joined(separator: "  ·  ")
+    }
+
+    static func meetURL(_ reminders: [CalendarReminder], now: Date) -> URL? {
+        visible(reminders, now: now).compactMap(\.meetURL).first
+    }
+}
+
+enum GoogleMeetLink {
+    static func validated(_ rawValue: String?) -> URL? {
+        guard let rawValue,
+              let components = URLComponents(string: rawValue),
+              components.scheme?.lowercased() == "https",
+              components.host?.lowercased() == "meet.google.com",
+              components.user == nil,
+              components.password == nil else {
+            return nil
+        }
+        return components.url
     }
 }
 
@@ -98,12 +126,23 @@ private struct GoogleCalendarEvent: Decodable {
         }
     }
 
+    struct ConferenceData: Decodable {
+        struct EntryPoint: Decodable {
+            let entryPointType: String?
+            let uri: String?
+        }
+
+        let entryPoints: [EntryPoint]?
+    }
+
     let id: String
     let summary: String?
     let status: String?
     let start: DateValue
     let end: DateValue
     let attendees: [Attendee]?
+    let hangoutLink: String?
+    let conferenceData: ConferenceData?
 }
 
 private enum GoogleCalendarClientError: LocalizedError {
@@ -320,7 +359,12 @@ final class CalendarMonitor {
             guard !title.isEmpty else { return nil }
             let key = "\(event.id)|\(startDate.timeIntervalSinceReferenceDate)"
             guard seen.insert(key).inserted else { return nil }
-            return CalendarReminder(title: title, startDate: startDate, endDate: endDate)
+            let conferenceURL = event.conferenceData?.entryPoints?
+                .first(where: { $0.entryPointType == "video" })
+                .flatMap { GoogleMeetLink.validated($0.uri) }
+            let meetURL = conferenceURL ?? GoogleMeetLink.validated(event.hangoutLink)
+            return CalendarReminder(title: title, startDate: startDate, endDate: endDate,
+                                    meetURL: meetURL)
         }
         return CalendarReminderLogic.visible(reminders, now: now)
     }
@@ -365,6 +409,58 @@ final class CalendarMonitor {
         if let date = formatter.date(from: value) { return date }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: value)
+    }
+}
+
+final class GlobalHotKey {
+    private var hotKeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+    private let action: () -> Void
+
+    init?(keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
+        self.action = action
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let installStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, _, userData in
+                guard let userData else { return OSStatus(eventNotHandledErr) }
+                let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(userData)
+                    .takeUnretainedValue()
+                DispatchQueue.main.async { hotKey.action() }
+                return noErr
+            },
+            1,
+            &eventType,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &handlerRef
+        )
+        guard installStatus == noErr else { return nil }
+
+        var registeredRef: EventHotKeyRef?
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4D436C6B), id: 1) // MClk
+        let registerStatus = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            OptionBits(0),
+            &registeredRef
+        )
+        guard registerStatus == noErr, let registeredRef else {
+            if let handlerRef { RemoveEventHandler(handlerRef) }
+            self.handlerRef = nil
+            return nil
+        }
+        hotKeyRef = registeredRef
+    }
+
+    deinit {
+        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+        if let handlerRef { RemoveEventHandler(handlerRef) }
     }
 }
 
@@ -649,6 +745,15 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(CalendarReminderLogic.displayText(visibleReminders, timeText: { date in
         date == overlapping.startDate ? "10:10" : "10:15"
     }) == "10:10 Team sync  ·  10:15 Design review")
+    let meetURL = URL(string: "https://meet.google.com/abc-defg-hij")!
+    let upcomingMeet = CalendarReminder(title: "Meet", startDate: upcoming.startDate,
+                                        endDate: upcoming.endDate, meetURL: meetURL)
+    precondition(CalendarReminderLogic.meetURL([overlapping, upcomingMeet], now: now) == meetURL)
+    precondition(GoogleMeetLink.validated("https://meet.google.com/abc-defg-hij") == meetURL)
+    precondition(GoogleMeetLink.validated("http://meet.google.com/abc-defg-hij") == nil)
+    precondition(GoogleMeetLink.validated("https://meet.google.com.evil.example/abc") == nil)
+    let userInfoURL = "https://user" + "@meet.google.com/abc"
+    precondition(GoogleMeetLink.validated(userInfoURL) == nil)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://toggle")!) == .toggle)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://on")!) == .turnOn)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://off")!) == .turnOff)
@@ -691,6 +796,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var focusText = ""
     private let calendarMonitor = CalendarMonitor()
     private var calendarReminders: [CalendarReminder] = []
+    private var openMeetHotKey: GlobalHotKey?
 
     private var screen: NSScreen? { NSScreen.screens.first }
 
@@ -719,6 +825,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             self?.setCalendarReminders(reminders)
         }
         calendarMonitor.start()
+        openMeetHotKey = GlobalHotKey(
+            keyCode: UInt32(kVK_ANSI_J),
+            modifiers: UInt32(cmdKey | controlKey)
+        ) { [weak self] in
+            self?.openCurrentGoogleMeet()
+        }
+        if openMeetHotKey == nil {
+            os_log("MenuCloak: could not register global shortcut Command-Control-J",
+                   type: .error)
+        } else {
+            os_log("MenuCloak: registered global shortcut Command-Control-J",
+                   type: .info)
+        }
         refreshAndLayout()
         setCovered(enabled, animate: false)
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
@@ -861,6 +980,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             setFocusText(text, persist: true)
             controlFocusField?.stringValue = focusText
         }
+    }
+
+    private func openCurrentGoogleMeet() {
+        guard let url = CalendarReminderLogic.meetURL(calendarReminders, now: Date()) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func showControlWindow() {

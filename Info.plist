@@ -15,7 +15,7 @@
 	<key>CFBundleIconFile</key>
 	<string>MenuCloak</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.5</string>
+	<string>1.6</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
