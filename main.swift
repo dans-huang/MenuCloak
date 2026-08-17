@@ -50,8 +50,9 @@ struct CalendarReminder: Equatable {
 
 enum CalendarReminderLogic {
     static let leadTime: TimeInterval = 15 * 60
+    static let noticeDurationAfterStart: TimeInterval = 3 * 60
 
-    static func visible(_ reminders: [CalendarReminder], now: Date) -> [CalendarReminder] {
+    static func activeOrUpcoming(_ reminders: [CalendarReminder], now: Date) -> [CalendarReminder] {
         let horizon = now.addingTimeInterval(leadTime)
         return reminders
             .filter { !$0.title.isEmpty && $0.endDate > now && $0.startDate <= horizon }
@@ -61,13 +62,19 @@ enum CalendarReminderLogic {
             }
     }
 
+    static func visible(_ reminders: [CalendarReminder], now: Date) -> [CalendarReminder] {
+        activeOrUpcoming(reminders, now: now).filter {
+            $0.startDate.addingTimeInterval(noticeDurationAfterStart) > now
+        }
+    }
+
     static func displayText(_ reminders: [CalendarReminder],
                             timeText: (Date) -> String) -> String {
         reminders.map { "\(timeText($0.startDate)) \($0.title)" }.joined(separator: "  ·  ")
     }
 
     static func meetURL(_ reminders: [CalendarReminder], now: Date) -> URL? {
-        visible(reminders, now: now).compactMap(\.meetURL).first
+        activeOrUpcoming(reminders, now: now).compactMap(\.meetURL).first
     }
 }
 
@@ -193,7 +200,7 @@ final class CalendarMonitor {
 
     private func refresh() {
         let now = Date()
-        onChange?(CalendarReminderLogic.visible(lastFetchedReminders, now: now))
+        onChange?(CalendarReminderLogic.activeOrUpcoming(lastFetchedReminders, now: now))
         if isLoading {
             refreshAfterLoad = true
             return
@@ -366,7 +373,7 @@ final class CalendarMonitor {
             return CalendarReminder(title: title, startDate: startDate, endDate: endDate,
                                     meetURL: meetURL)
         }
-        return CalendarReminderLogic.visible(reminders, now: now)
+        return CalendarReminderLogic.activeOrUpcoming(reminders, now: now)
     }
 
     private func finish(reminders: [CalendarReminder]) {
@@ -376,7 +383,7 @@ final class CalendarMonitor {
             NSLog("MenuCloak Google Calendar: connected")
             didLogConnection = true
         }
-        onChange?(CalendarReminderLogic.visible(reminders, now: Date()))
+        onChange?(CalendarReminderLogic.activeOrUpcoming(reminders, now: Date()))
         finishLoading()
     }
 
@@ -734,21 +741,29 @@ if CommandLine.arguments.contains("--selftest") {
                                        endDate: now.addingTimeInterval(40 * 60))
     let tooFar = CalendarReminder(title: "Later", startDate: now.addingTimeInterval(15 * 60 + 1),
                                   endDate: now.addingTimeInterval(60 * 60))
-    let ongoing = CalendarReminder(title: "In progress", startDate: now.addingTimeInterval(-10 * 60),
-                                   endDate: now.addingTimeInterval(10 * 60))
+    let recentlyStarted = CalendarReminder(title: "In progress",
+                                           startDate: now.addingTimeInterval(-3 * 60 + 1),
+                                           endDate: now.addingTimeInterval(10 * 60))
+    let noticeExpired = CalendarReminder(title: "Still in progress",
+                                         startDate: now.addingTimeInterval(-3 * 60),
+                                         endDate: now.addingTimeInterval(10 * 60))
     let ended = CalendarReminder(title: "Finished", startDate: now.addingTimeInterval(-30 * 60),
                                  endDate: now)
     let visibleReminders = CalendarReminderLogic.visible([upcoming, tooFar, overlapping], now: now)
     precondition(visibleReminders == [overlapping, upcoming])
-    precondition(CalendarReminderLogic.visible([ongoing], now: now) == [ongoing])
-    precondition(CalendarReminderLogic.visible([ended, tooFar], now: now).isEmpty)
+    precondition(CalendarReminderLogic.visible([recentlyStarted], now: now) == [recentlyStarted])
+    precondition(CalendarReminderLogic.visible([noticeExpired, ended, tooFar], now: now).isEmpty)
     precondition(CalendarReminderLogic.displayText(visibleReminders, timeText: { date in
         date == overlapping.startDate ? "10:10" : "10:15"
     }) == "10:10 Team sync  ·  10:15 Design review")
     let meetURL = URL(string: "https://meet.google.com/abc-defg-hij")!
     let upcomingMeet = CalendarReminder(title: "Meet", startDate: upcoming.startDate,
                                         endDate: upcoming.endDate, meetURL: meetURL)
+    let activeMeet = CalendarReminder(title: noticeExpired.title,
+                                      startDate: noticeExpired.startDate,
+                                      endDate: noticeExpired.endDate, meetURL: meetURL)
     precondition(CalendarReminderLogic.meetURL([overlapping, upcomingMeet], now: now) == meetURL)
+    precondition(CalendarReminderLogic.meetURL([activeMeet], now: now) == meetURL)
     precondition(GoogleMeetLink.validated("https://meet.google.com/abc-defg-hij") == meetURL)
     precondition(GoogleMeetLink.validated("http://meet.google.com/abc-defg-hij") == nil)
     precondition(GoogleMeetLink.validated("https://meet.google.com.evil.example/abc") == nil)
@@ -796,6 +811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var focusText = ""
     private let calendarMonitor = CalendarMonitor()
     private var calendarReminders: [CalendarReminder] = []
+    private var activeCalendarReminders: [CalendarReminder] = []
     private var openMeetHotKey: GlobalHotKey?
 
     private var screen: NSScreen? { NSScreen.screens.first }
@@ -822,7 +838,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         }
         setFocusText(focusTextStore.loadMigratingLegacyIfNeeded(), persist: false)
         calendarMonitor.onChange = { [weak self] reminders in
-            self?.setCalendarReminders(reminders)
+            guard let self else { return }
+            self.activeCalendarReminders = reminders
+            self.setCalendarReminders(CalendarReminderLogic.visible(reminders, now: Date()))
         }
         calendarMonitor.start()
         openMeetHotKey = GlobalHotKey(
@@ -983,7 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
 
     private func openCurrentGoogleMeet() {
-        guard let url = CalendarReminderLogic.meetURL(calendarReminders, now: Date()) else { return }
+        guard let url = CalendarReminderLogic.meetURL(activeCalendarReminders, now: Date()) else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -1207,6 +1225,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private func tick() {
         guard enabled, let s = screen else { setCovered(false, animate: false); return }
         tickCount += 1
+        if tickCount % 10 == 0 {
+            setCalendarReminders(CalendarReminderLogic.visible(activeCalendarReminders, now: Date()))
+        }
         if tickCount % 3 == 0 {
             refreshAndLayout()
         }   // 0.3s probe cadence

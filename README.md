@@ -18,14 +18,15 @@ launch after upgrading from the earlier One Thing-powered version, MenuCloak imp
 the existing One Thing text once. It never reads One Thing again after that migration.
 
 MenuCloak can also read the primary Google Calendar directly through the Google Calendar
-API. A timed event replaces the focus text from 15 minutes before it starts until it ends,
-with a slowly pulsing orange signal for attention. Overlapping and back-to-back events are
+API. A timed event replaces the focus text from 15 minutes before it starts until three
+minutes after it starts, with a slowly pulsing orange signal for attention. Overlapping and back-to-back events are
 combined in start-time order. All-day and declined events are ignored, and the saved
 focus text returns automatically when no event qualifies.
 
 Press **Command-Control-J** from any app to open the nearest qualifying event's
 Google Meet link in the default browser. If several meetings overlap, MenuCloak opens
 the earliest one that has a Meet link; if none has one, nothing happens.
+The shortcut remains available until the meeting ends, even after its notice is hidden.
 
 ## How it works
 
