@@ -243,6 +243,14 @@ private enum GoogleCalendarCredentialsLoader {
            !bundled.isEmpty { return bundled }
         return nil
     }
+
+    static func oauthClientSecret() -> String? {
+        if let configured = ProcessInfo.processInfo.environment["MENUCLOAK_GOOGLE_CLIENT_SECRET"],
+           !configured.isEmpty { return configured }
+        if let bundled = Bundle.main.object(forInfoDictionaryKey: "MenuCloakGoogleClientSecret") as? String,
+           !bundled.isEmpty { return bundled }
+        return nil
+    }
 }
 
 private enum GoogleCalendarConnectionState: Equatable {
@@ -473,6 +481,7 @@ private final class GoogleOAuthController {
             completion(.failure(GoogleOAuthError.missingClientID))
             return
         }
+        let clientSecret = GoogleCalendarCredentialsLoader.oauthClientSecret()
         guard let verifier = GoogleOAuthPKCE.randomURLSafeString(byteCount: 48),
               let state = GoogleOAuthPKCE.randomURLSafeString(byteCount: 24) else {
             completion(.failure(GoogleOAuthError.listener))
@@ -486,7 +495,8 @@ private final class GoogleOAuthController {
         do {
             var redirectURL: URL!
             redirectURL = try server.start { [weak self] result in
-                self?.handleCallback(result, clientID: clientID, verifier: verifier,
+                self?.handleCallback(result, clientID: clientID, clientSecret: clientSecret,
+                                     verifier: verifier,
                                      state: state, redirectURL: redirectURL,
                                      attemptID: attemptID)
             }
@@ -557,6 +567,7 @@ private final class GoogleOAuthController {
     }
 
     private func handleCallback(_ result: Result<URL, Error>, clientID: String,
+                                clientSecret: String?,
                                 verifier: String, state: String, redirectURL: URL,
                                 attemptID: UUID) {
         guard self.attemptID == attemptID else { return }
@@ -584,21 +595,39 @@ private final class GoogleOAuthController {
                 finish(.failure(GoogleOAuthError.invalidCallback), attemptID: attemptID)
                 return
             }
-            exchange(code: code, clientID: clientID, verifier: verifier,
+            exchange(code: code, clientID: clientID, clientSecret: clientSecret,
+                     verifier: verifier,
                      redirectURL: redirectURL, attemptID: attemptID)
         }
     }
 
-    private func exchange(code: String, clientID: String, verifier: String,
-                          redirectURL: URL, attemptID: UUID) {
-        var form = URLComponents()
-        form.queryItems = [
+    static func tokenExchangeQueryItems(code: String, clientID: String,
+                                        clientSecret: String?, verifier: String,
+                                        redirectURL: URL) -> [URLQueryItem] {
+        var items = [
             URLQueryItem(name: "client_id", value: clientID),
             URLQueryItem(name: "code", value: code),
             URLQueryItem(name: "code_verifier", value: verifier),
             URLQueryItem(name: "grant_type", value: "authorization_code"),
             URLQueryItem(name: "redirect_uri", value: redirectURL.absoluteString)
         ]
+        if let clientSecret, !clientSecret.isEmpty {
+            items.append(URLQueryItem(name: "client_secret", value: clientSecret))
+        }
+        return items
+    }
+
+    private func exchange(code: String, clientID: String, clientSecret: String?,
+                          verifier: String,
+                          redirectURL: URL, attemptID: UUID) {
+        var form = URLComponents()
+        form.queryItems = Self.tokenExchangeQueryItems(
+            code: code,
+            clientID: clientID,
+            clientSecret: clientSecret,
+            verifier: verifier,
+            redirectURL: redirectURL
+        )
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -637,7 +666,7 @@ private final class GoogleOAuthController {
                 }
                 self.finish(.success(GoogleCalendarCredentials(
                     clientID: clientID,
-                    clientSecret: nil,
+                    clientSecret: clientSecret,
                     refreshToken: refreshToken
                 )), attemptID: attemptID)
             }
@@ -1413,6 +1442,24 @@ if CommandLine.arguments.contains("--selftest") {
         ($0.name, $0.value ?? "")
     })
     precondition(authorizationValues["scope"] == GoogleOAuthController.calendarScope)
+    let tokenItems = GoogleOAuthController.tokenExchangeQueryItems(
+        code: "code",
+        clientID: "client.apps.googleusercontent.com",
+        clientSecret: "secret",
+        verifier: "verifier",
+        redirectURL: URL(string: "http://127.0.0.1:54321/")!
+    )
+    let tokenValues = GoogleOAuthController.uniqueQueryValues(tokenItems)!
+    precondition(tokenValues["client_secret"] == "secret")
+    precondition(tokenValues["redirect_uri"] == "http://127.0.0.1:54321/")
+    let publicTokenItems = GoogleOAuthController.tokenExchangeQueryItems(
+        code: "code",
+        clientID: "client.apps.googleusercontent.com",
+        clientSecret: nil,
+        verifier: "verifier",
+        redirectURL: URL(string: "http://127.0.0.1:54321/")!
+    )
+    precondition(GoogleOAuthController.uniqueQueryValues(publicTokenItems)?["client_secret"] == nil)
     precondition(authorizationValues["redirect_uri"] == redirect.absoluteString)
     precondition(authorizationValues["code_challenge_method"] == "S256")
     precondition(authorizationValues["access_type"] == "offline")
