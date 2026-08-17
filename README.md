@@ -2,6 +2,8 @@
 
 Turn the unused left side of the macOS menu bar into a calm, persistent focus surface.
 
+[Website](https://dans-huang.github.io/MenuCloak/) · [Privacy](https://dans-huang.github.io/MenuCloak/privacy.html) · [Terms](https://dans-huang.github.io/MenuCloak/terms.html)
+
 Hides the **app menus in the macOS menu bar** behind a black overlay. The Apple menu
 () stays visible and clickable; everything on the right — status items, Control
 Center, clock — stays visible. On a notched MacBook the black strip merges with the
@@ -77,11 +79,16 @@ loopback callback, and the refresh token is stored in macOS Keychain. **Disconne
 that Keychain login immediately. Meeting reminders include the event location when present;
 for Workspace room bookings, MenuCloak falls back to the calendar resource's display name.
 
-The repository bundles MenuCloak's public Google OAuth **Desktop app** client ID, so the
-standard installer can open Google sign-in without any local credentials file. Forks and
-developer builds can set `MENUCLOAK_GOOGLE_CLIENT_ID` to replace that client ID at build
-time. The OAuth consent project must be External and In production for arbitrary Google
-accounts, and Google may require verification for the `calendar.readonly` scope.
+The repository bundles MenuCloak's public Google OAuth **Desktop app** client ID. Official
+release builds also inject the matching Desktop client secret into the app package so Google
+can complete the token exchange; the secret is intentionally absent from source control.
+Forks and developer builds can set `MENUCLOAK_GOOGLE_CLIENT_ID` and
+`MENUCLOAK_GOOGLE_CLIENT_SECRET` at build time, or point
+`MENUCLOAK_GOOGLE_OAUTH_CLIENT_JSON` to a downloaded Desktop client JSON. Google treats
+installed-app client secrets as non-confidential identifiers, not as a way to authenticate
+a distributed native app.
+The OAuth consent project must be External and In production for arbitrary Google accounts,
+and Google requires verification for the `calendar.readonly` scope.
 
 Existing installations configured with the older local OAuth JSON continue to work. They
 can disconnect, and release builds configured with a Desktop client ID can connect again
