@@ -17,6 +17,12 @@ keeps clear of the camera notch, and truncates only when it cannot fit. On the f
 launch after upgrading from the earlier One Thing-powered version, MenuCloak imports
 the existing One Thing text once. It never reads One Thing again after that migration.
 
+MenuCloak can also read the primary Google Calendar directly through the Google Calendar
+API. A timed event replaces the focus text from 15 minutes before it starts until it ends,
+with a slowly pulsing orange signal for attention. Overlapping and back-to-back events are
+combined in start-time order. All-day and declined events are ignored, and the saved
+focus text returns automatically when no event qualifies.
+
 ## How it works
 
 A borderless, click-through black `NSWindow` at status-window level (25) — one level
@@ -57,6 +63,19 @@ or Spotlight to edit the focus text or use the on/off switch. Closing the contro
 waiting quietly in the background and removes its Dock icon; opening the app again
 brings the switch back. The setting is remembered across restarts. Login startup uses
 the `--background` flag so no window or Dock icon appears automatically.
+
+Google Calendar does not require Apple Calendar access or local Calendar syncing. Give
+MenuCloak a local OAuth JSON file containing `client_id`, `client_secret`, and
+`refresh_token` with the `calendar.readonly` scope:
+
+```bash
+./configure-google-calendar.sh /absolute/path/to/google-oauth-token.json
+```
+
+The helper locks down the token file permissions and creates
+`~/.config/menucloak/google-calendar.json` as a symlink to that local file; it never
+copies credentials into the app or repository. Set
+`MENUCLOAK_GOOGLE_CREDENTIALS` to another absolute path to override the default.
 
 `MenuCloak --selftest` runs the geometry checks.
 

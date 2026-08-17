@@ -11,6 +11,8 @@
 // auto-hides there anyway). Upgrade path: one overlay per NSScreen.
 
 import AppKit
+import Foundation
+import QuartzCore
 
 enum Fade {
     static let duration: TimeInterval = 0.15
@@ -30,6 +32,342 @@ enum FocusText {
     }
 }
 
+struct CalendarReminder: Equatable {
+    let title: String
+    let startDate: Date
+    let endDate: Date
+}
+
+enum CalendarReminderLogic {
+    static let leadTime: TimeInterval = 15 * 60
+
+    static func visible(_ reminders: [CalendarReminder], now: Date) -> [CalendarReminder] {
+        let horizon = now.addingTimeInterval(leadTime)
+        return reminders
+            .filter { !$0.title.isEmpty && $0.endDate > now && $0.startDate <= horizon }
+            .sorted {
+                if $0.startDate != $1.startDate { return $0.startDate < $1.startDate }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+    }
+
+    static func displayText(_ reminders: [CalendarReminder],
+                            timeText: (Date) -> String) -> String {
+        reminders.map { "\(timeText($0.startDate)) \($0.title)" }.joined(separator: "  ·  ")
+    }
+}
+
+private struct GoogleCalendarCredentials: Decodable {
+    let clientID: String
+    let clientSecret: String
+    let refreshToken: String
+
+    enum CodingKeys: String, CodingKey {
+        case clientID = "client_id"
+        case clientSecret = "client_secret"
+        case refreshToken = "refresh_token"
+    }
+}
+
+private struct GoogleOAuthTokenResponse: Decodable {
+    let accessToken: String
+    let expiresIn: TimeInterval
+
+    enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token"
+        case expiresIn = "expires_in"
+    }
+}
+
+private struct GoogleCalendarEventList: Decodable {
+    let items: [GoogleCalendarEvent]?
+}
+
+private struct GoogleCalendarEvent: Decodable {
+    struct DateValue: Decodable {
+        let dateTime: String?
+    }
+
+    struct Attendee: Decodable {
+        let isSelf: Bool?
+        let responseStatus: String?
+
+        enum CodingKeys: String, CodingKey {
+            case isSelf = "self"
+            case responseStatus
+        }
+    }
+
+    let id: String
+    let summary: String?
+    let status: String?
+    let start: DateValue
+    let end: DateValue
+    let attendees: [Attendee]?
+}
+
+private enum GoogleCalendarClientError: LocalizedError {
+    case missingCredentials(String)
+    case invalidCredentials
+    case malformedResponse
+    case http(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingCredentials(let path):
+            return "Google Calendar credentials not found at \(path)"
+        case .invalidCredentials:
+            return "Google Calendar credentials are incomplete"
+        case .malformedResponse:
+            return "Google Calendar returned an unreadable response"
+        case .http(let status):
+            return "Google Calendar request failed with HTTP \(status)"
+        }
+    }
+}
+
+final class CalendarMonitor {
+    var onChange: (([CalendarReminder]) -> Void)?
+
+    private let session = URLSession(configuration: .ephemeral)
+    private var timer: Timer?
+    private var isLoading = false
+    private var refreshAfterLoad = false
+    private var accessToken: String?
+    private var accessTokenExpiry = Date.distantPast
+    private var lastFetchedReminders: [CalendarReminder] = []
+    private var lastLoggedError = ""
+    private var didLogConnection = false
+
+    func start() {
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+        if let timer { RunLoop.main.add(timer, forMode: .common) }
+    }
+
+    deinit {
+        timer?.invalidate()
+        session.invalidateAndCancel()
+    }
+
+    private func refresh() {
+        let now = Date()
+        onChange?(CalendarReminderLogic.visible(lastFetchedReminders, now: now))
+        if isLoading {
+            refreshAfterLoad = true
+            return
+        }
+        isLoading = true
+        do {
+            let credentials = try loadCredentials()
+            ensureAccessToken(credentials: credentials) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success(let token):
+                    self.fetchEvents(token: token, credentials: credentials, now: now, canRetry: true)
+                case .failure(let error):
+                    self.finish(error: error)
+                }
+            }
+        } catch {
+            finish(error: error)
+        }
+    }
+
+    private func credentialsURL() -> URL {
+        if let configured = ProcessInfo.processInfo.environment["MENUCLOAK_GOOGLE_CREDENTIALS"],
+           !configured.isEmpty {
+            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/menucloak/google-calendar.json")
+    }
+
+    private func loadCredentials() throws -> GoogleCalendarCredentials {
+        let url = credentialsURL()
+        guard let data = try? Data(contentsOf: url) else {
+            throw GoogleCalendarClientError.missingCredentials(url.path)
+        }
+        let credentials = try JSONDecoder().decode(GoogleCalendarCredentials.self, from: data)
+        guard !credentials.clientID.isEmpty, !credentials.clientSecret.isEmpty,
+              !credentials.refreshToken.isEmpty else {
+            throw GoogleCalendarClientError.invalidCredentials
+        }
+        return credentials
+    }
+
+    private func ensureAccessToken(credentials: GoogleCalendarCredentials,
+                                   completion: @escaping (Result<String, Error>) -> Void) {
+        if let accessToken, accessTokenExpiry.timeIntervalSinceNow > 60 {
+            completion(.success(accessToken))
+            return
+        }
+
+        var form = URLComponents()
+        form.queryItems = [
+            URLQueryItem(name: "client_id", value: credentials.clientID),
+            URLQueryItem(name: "client_secret", value: credentials.clientSecret),
+            URLQueryItem(name: "refresh_token", value: credentials.refreshToken),
+            URLQueryItem(name: "grant_type", value: "refresh_token")
+        ]
+        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = form.percentEncodedQuery?.data(using: .utf8)
+        session.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    completion(.failure(GoogleCalendarClientError.malformedResponse))
+                    return
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    completion(.failure(GoogleCalendarClientError.http(http.statusCode)))
+                    return
+                }
+                guard let data,
+                      let token = try? JSONDecoder().decode(GoogleOAuthTokenResponse.self, from: data),
+                      !token.accessToken.isEmpty else {
+                    completion(.failure(GoogleCalendarClientError.malformedResponse))
+                    return
+                }
+                self.accessToken = token.accessToken
+                self.accessTokenExpiry = Date().addingTimeInterval(token.expiresIn)
+                completion(.success(token.accessToken))
+            }
+        }.resume()
+    }
+
+    private func fetchEvents(token: String, credentials: GoogleCalendarCredentials,
+                             now: Date, canRetry: Bool) {
+        var components = URLComponents(string: "https://www.googleapis.com/calendar/v3/calendars/primary/events")!
+        components.queryItems = [
+            URLQueryItem(name: "timeMin", value: Self.rfc3339(now.addingTimeInterval(-24 * 60 * 60))),
+            // Google treats timeMax as exclusive; fetch one extra second so an event
+            // exactly 15 minutes away survives the local inclusive boundary check.
+            URLQueryItem(name: "timeMax", value: Self.rfc3339(
+                now.addingTimeInterval(CalendarReminderLogic.leadTime + 1)
+            )),
+            URLQueryItem(name: "timeZone", value: TimeZone.current.identifier),
+            URLQueryItem(name: "singleEvents", value: "true"),
+            URLQueryItem(name: "orderBy", value: "startTime"),
+            URLQueryItem(name: "maxResults", value: "2500")
+        ]
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        session.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    self.finish(error: error)
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    self.finish(error: GoogleCalendarClientError.malformedResponse)
+                    return
+                }
+                if http.statusCode == 401, canRetry {
+                    self.accessToken = nil
+                    self.accessTokenExpiry = .distantPast
+                    self.ensureAccessToken(credentials: credentials) { [weak self] result in
+                        guard let self else { return }
+                        switch result {
+                        case .success(let refreshedToken):
+                            self.fetchEvents(token: refreshedToken, credentials: credentials,
+                                             now: now, canRetry: false)
+                        case .failure(let error):
+                            self.finish(error: error)
+                        }
+                    }
+                    return
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    self.finish(error: GoogleCalendarClientError.http(http.statusCode))
+                    return
+                }
+                guard let data,
+                      let list = try? JSONDecoder().decode(GoogleCalendarEventList.self, from: data) else {
+                    self.finish(error: GoogleCalendarClientError.malformedResponse)
+                    return
+                }
+                self.finish(reminders: self.reminders(from: list.items ?? [], now: now))
+            }
+        }.resume()
+    }
+
+    private func reminders(from events: [GoogleCalendarEvent], now: Date) -> [CalendarReminder] {
+        var seen = Set<String>()
+        let reminders = events.compactMap { event -> CalendarReminder? in
+            guard event.status != "cancelled",
+                  event.attendees?.contains(where: {
+                      $0.isSelf == true && $0.responseStatus == "declined"
+                  }) != true,
+                  let startText = event.start.dateTime,
+                  let endText = event.end.dateTime,
+                  let startDate = Self.date(fromRFC3339: startText),
+                  let endDate = Self.date(fromRFC3339: endText),
+                  endDate > now,
+                  startDate <= now.addingTimeInterval(CalendarReminderLogic.leadTime) else {
+                return nil
+            }
+            let title = FocusText.displayText(event.summary ?? "")
+            guard !title.isEmpty else { return nil }
+            let key = "\(event.id)|\(startDate.timeIntervalSinceReferenceDate)"
+            guard seen.insert(key).inserted else { return nil }
+            return CalendarReminder(title: title, startDate: startDate, endDate: endDate)
+        }
+        return CalendarReminderLogic.visible(reminders, now: now)
+    }
+
+    private func finish(reminders: [CalendarReminder]) {
+        lastFetchedReminders = reminders
+        lastLoggedError = ""
+        if !didLogConnection {
+            NSLog("MenuCloak Google Calendar: connected")
+            didLogConnection = true
+        }
+        onChange?(CalendarReminderLogic.visible(reminders, now: Date()))
+        finishLoading()
+    }
+
+    private func finish(error: Error) {
+        let message = error.localizedDescription
+        if message != lastLoggedError {
+            NSLog("MenuCloak Google Calendar: %@", message)
+            lastLoggedError = message
+        }
+        finishLoading()
+    }
+
+    private func finishLoading() {
+        isLoading = false
+        if refreshAfterLoad {
+            refreshAfterLoad = false
+            refresh()
+        }
+    }
+
+    private static func rfc3339(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    private static func date(fromRFC3339 value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+}
+
 final class OverlayTextView: NSView {
     var text = "" {
         didSet {
@@ -37,9 +375,22 @@ final class OverlayTextView: NSView {
             setAccessibilityValue(text)
         }
     }
+    var showsAttentionSignal = false {
+        didSet {
+            guard showsAttentionSignal != oldValue else { return }
+            updatePulsing()
+            needsDisplay = true
+        }
+    }
+    private let signalLayer = CALayer()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        wantsLayer = true
+        signalLayer.backgroundColor = NSColor.systemOrange.cgColor
+        signalLayer.cornerRadius = 3
+        signalLayer.isHidden = true
+        layer?.addSublayer(signalLayer)
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
         setAccessibilityLabel("MenuCloak focus")
@@ -47,6 +398,32 @@ final class OverlayTextView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        let diameter: CGFloat = 6
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        signalLayer.frame = CGRect(x: 0, y: floor((bounds.height - diameter) / 2),
+                                   width: diameter, height: diameter)
+        CATransaction.commit()
+    }
+
+    private func updatePulsing() {
+        signalLayer.removeAnimation(forKey: "attentionPulse")
+        signalLayer.opacity = 1
+        signalLayer.isHidden = !showsAttentionSignal
+        guard showsAttentionSignal else { return }
+
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1.0
+        pulse.toValue = 0.18
+        pulse.duration = 1.4
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        signalLayer.add(pulse, forKey: "attentionPulse")
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -62,8 +439,9 @@ final class OverlayTextView: NSView {
             with: .init(width: bounds.width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         ).height)
-        let textRect = NSRect(x: 0, y: floor((bounds.height - textHeight) / 2),
-                              width: bounds.width, height: textHeight)
+        let signalSpace: CGFloat = showsAttentionSignal ? 14 : 0
+        let textRect = NSRect(x: signalSpace, y: floor((bounds.height - textHeight) / 2),
+                              width: max(bounds.width - signalSpace, 0), height: textHeight)
         attributedText.draw(with: textRect,
                             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
@@ -253,6 +631,24 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(LegacyOneThing.cacheFilename(inJournal: "other abc 1\nonething newest 4\n") == "newest")
     precondition(LegacyOneThing.cacheFilename(inJournal: "onething ../escape 1\n") == nil)
     precondition(FocusText.displayText("  Finish the project  \n today ") == "Finish the project today")
+    let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+    let upcoming = CalendarReminder(title: "Design review", startDate: now.addingTimeInterval(15 * 60),
+                                    endDate: now.addingTimeInterval(45 * 60))
+    let overlapping = CalendarReminder(title: "Team sync", startDate: now.addingTimeInterval(10 * 60),
+                                       endDate: now.addingTimeInterval(40 * 60))
+    let tooFar = CalendarReminder(title: "Later", startDate: now.addingTimeInterval(15 * 60 + 1),
+                                  endDate: now.addingTimeInterval(60 * 60))
+    let ongoing = CalendarReminder(title: "In progress", startDate: now.addingTimeInterval(-10 * 60),
+                                   endDate: now.addingTimeInterval(10 * 60))
+    let ended = CalendarReminder(title: "Finished", startDate: now.addingTimeInterval(-30 * 60),
+                                 endDate: now)
+    let visibleReminders = CalendarReminderLogic.visible([upcoming, tooFar, overlapping], now: now)
+    precondition(visibleReminders == [overlapping, upcoming])
+    precondition(CalendarReminderLogic.visible([ongoing], now: now) == [ongoing])
+    precondition(CalendarReminderLogic.visible([ended, tooFar], now: now).isEmpty)
+    precondition(CalendarReminderLogic.displayText(visibleReminders, timeText: { date in
+        date == overlapping.startDate ? "10:10" : "10:15"
+    }) == "10:10 Team sync  ·  10:15 Design review")
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://toggle")!) == .toggle)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://on")!) == .turnOn)
     precondition(MenuCloakURLAction.parse(URL(string: "menucloak://off")!) == .turnOff)
@@ -293,6 +689,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var lastHold = Date.distantPast
     private let focusTextStore = FocusTextStore()
     private var focusText = ""
+    private let calendarMonitor = CalendarMonitor()
+    private var calendarReminders: [CalendarReminder] = []
 
     private var screen: NSScreen? { NSScreen.screens.first }
 
@@ -317,6 +715,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             }
         }
         setFocusText(focusTextStore.loadMigratingLegacyIfNeeded(), persist: false)
+        calendarMonitor.onChange = { [weak self] reminders in
+            self?.setCalendarReminders(reminders)
+        }
+        calendarMonitor.start()
         refreshAndLayout()
         setCovered(enabled, animate: false)
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
@@ -634,9 +1036,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let text = persist ? focusTextStore.save(raw) : FocusText.displayText(raw)
         guard text != focusText else { return }
         focusText = text
+        refreshDisplayedText()
+    }
+
+    private func setCalendarReminders(_ reminders: [CalendarReminder]) {
+        guard reminders != calendarReminders else { return }
+        calendarReminders = reminders
+        refreshDisplayedText()
+    }
+
+    private func refreshDisplayedText() {
+        let reminderText = CalendarReminderLogic.displayText(calendarReminders) {
+            DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short)
+        }
+        let text = reminderText.isEmpty ? focusText : reminderText
         focusLabel.text = text
         focusLabel.toolTip = text.isEmpty ? nil : text
         focusLabel.isHidden = text.isEmpty
+        focusLabel.showsAttentionSignal = !reminderText.isEmpty
     }
 
     private func setCovered(_ on: Bool, animate: Bool) {
