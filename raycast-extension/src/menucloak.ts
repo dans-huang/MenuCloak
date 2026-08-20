@@ -8,10 +8,7 @@ async function isInstalled(): Promise<boolean> {
   return applications.some((application) => application.bundleId === bundleId);
 }
 
-export async function runMenuCloakAction(
-  action: string,
-  confirmation: string,
-): Promise<void> {
+export async function runMenuCloakAction(action: string, confirmation: string): Promise<void> {
   if (!(await isInstalled())) {
     await showToast({
       style: Toast.Style.Failure,
@@ -25,6 +22,6 @@ export async function runMenuCloakAction(
     return;
   }
 
-  await open(`menucloak://${action}`);
+  await open(`menucloak://${action}`, bundleId);
   await showHUD(confirmation);
 }
