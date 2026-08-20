@@ -149,6 +149,8 @@ fork or installing without a remote freshness check.
   the cover snaps back instantly (no fade) the moment a switch lands.
 - Mission Control: the cover hides while the overview is open and returns as soon
   as the overview closes.
+- Menus: dropdowns attached to the covered menu bar reveal it; right-click context
+  menus elsewhere leave the cover in place.
 - Real fullscreen: cover yields ~1s after the menu bar is confirmed gone,
   re-covers within ~0.2s of leaving fullscreen.
 - `MENUCLOAK_SPACE_LEVEL` env overrides the private space's absolute level

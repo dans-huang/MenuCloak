@@ -1319,10 +1319,18 @@ enum Geometry {
             && abs(frame.height - nativeBarHeight) <= 1
     }
 
-    static func isMenuBarPopup(frame: CGRect, barHeight: CGFloat, coverWidth: CGFloat) -> Bool {
-        let hangsFromMenuBar = frame.minY <= barHeight + 8
-        let nearMenuBarSubmenu = frame.minY <= barHeight + frame.height + 30
-        return frame.minX < coverWidth && (hangsFromMenuBar || nearMenuBarSubmenu)
+    // A menu-bar dropdown hangs off the bar itself: its top edge sits at the bar's
+    // bottom edge (CGWindow bounds count down from the top of the screen, so
+    // minY is the distance from the top). A right-click context menu is the same
+    // kind of window at the same level, but it is anchored to the cursor, so it
+    // starts further down — that gap is the only thing separating the two.
+    //
+    // Submenus need no rule of their own: macOS keeps the parent dropdown on
+    // screen for as long as a submenu is open, so the parent keeps the cover
+    // lifted by itself. The old extra allowance scaled with the popup's own
+    // height, causing tall context menus to be mistaken for menu-bar dropdowns.
+    static func isMenuBarDropdown(frame: CGRect, barHeight: CGFloat, coverWidth: CGFloat) -> Bool {
+        frame.minX < coverWidth && frame.minY <= barHeight + 8
     }
 }
 
@@ -1354,10 +1362,18 @@ if CommandLine.arguments.contains("--selftest") {
                                             screenWidth: 1352, nativeBarHeight: 30))
     precondition(!Geometry.isMenuBarBackdrop(frame: .init(x: 0, y: 0, width: 1352, height: 878),
                                              screenWidth: 1352, nativeBarHeight: 30))
-    precondition(Geometry.isMenuBarPopup(frame: .init(x: 100, y: 33, width: 111, height: 58), barHeight: 30, coverWidth: 869))
-    precondition(Geometry.isMenuBarPopup(frame: .init(x: 204, y: 107, width: 101, height: 53), barHeight: 30, coverWidth: 869))
-    precondition(!Geometry.isMenuBarPopup(frame: .init(x: 676, y: 434, width: 111, height: 58), barHeight: 30, coverWidth: 869))
-    precondition(!Geometry.isMenuBarPopup(frame: .init(x: 968, y: 30, width: 320, height: 718), barHeight: 30, coverWidth: 869))
+    // dropdown flush with the bar reveals; anything anchored lower does not
+    precondition(Geometry.isMenuBarDropdown(frame: .init(x: 100, y: 33, width: 111, height: 58), barHeight: 30, coverWidth: 869))
+    precondition(!Geometry.isMenuBarDropdown(frame: .init(x: 676, y: 434, width: 111, height: 58), barHeight: 30, coverWidth: 869))
+    precondition(!Geometry.isMenuBarDropdown(frame: .init(x: 968, y: 30, width: 320, height: 718), barHeight: 30, coverWidth: 869))
+    // measured menu-bar dropdown and submenu. The parent remains on screen, so
+    // matching the parent alone keeps the cloak revealed while the submenu is open.
+    precondition(Geometry.isMenuBarDropdown(frame: .init(x: 29, y: 31, width: 308, height: 388), barHeight: 30, coverWidth: 926))
+    precondition(!Geometry.isMenuBarDropdown(frame: .init(x: 332, y: 208, width: 239, height: 261), barHeight: 30, coverWidth: 926))
+    // measured 394pt-tall right-click context menus must never reveal the menu bar
+    precondition(!Geometry.isMenuBarDropdown(frame: .init(x: 301, y: 194, width: 128, height: 394), barHeight: 30, coverWidth: 926))
+    precondition(!Geometry.isMenuBarDropdown(frame: .init(x: 301, y: 314, width: 128, height: 394), barHeight: 30, coverWidth: 926))
+    precondition(!Geometry.isMenuBarDropdown(frame: .init(x: 301, y: 445, width: 128, height: 394), barHeight: 30, coverWidth: 926))
     precondition(SystemOverview.isMissionControlWindow(
         ownerBundleIdentifier: "com.apple.dock", layer: 18,
         frame: .init(x: 0, y: 0, width: 1352, height: 878)
@@ -1978,7 +1994,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
 
     // only dropdowns hanging off the covered part of the menu bar count —
     // right-click context menus (same window level, but anchored at the cursor)
-    // must not lift the cover
+    // must not lift the cover, and neither must submenus on their own
     private func menuBarMenuOpen(barH: CGFloat, coverWidth: CGFloat) -> Bool {
         let menuLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
         for info in windowInfos() {
@@ -1986,7 +2002,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                   (info[kCGWindowAlpha as String] as? Double ?? 0) > 0.05,
                   let bd = info[kCGWindowBounds as String] as? NSDictionary,
                   let r = CGRect(dictionaryRepresentation: bd) else { continue }
-            if Geometry.isMenuBarPopup(frame: r, barHeight: barH, coverWidth: coverWidth) { return true }
+            if Geometry.isMenuBarDropdown(frame: r, barHeight: barH, coverWidth: coverWidth) { return true }
         }
         return false
     }
