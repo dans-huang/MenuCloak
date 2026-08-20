@@ -135,6 +135,13 @@ Quit / toggle: open the app, or use its menu bar icon (◧). Note: if a menu bar
 (e.g. Ice) auto-hides new items, the icon lands in its hidden section — or just
 `pkill MenuCloak`.
 
+When its files are tracked by Git, the login-item installer refuses to deploy from
+an unrelated repository or from a checkout that does not include the latest remote
+`main`.
+This prevents stale copies made from current releases from silently replacing the
+app. Set `MENUCLOAK_ALLOW_UNVERIFIED_SOURCE=1` only when intentionally testing a
+fork or installing without a remote freshness check.
+
 ## Behavior details
 
 - **Black by default.** The cover holds through desktop/Space switches — transient
