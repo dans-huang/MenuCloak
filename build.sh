@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-APP=MenuCloak.app
+APP="${MENUCLOAK_BUILD_OUTPUT:-MenuCloak.app}"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
@@ -35,6 +35,16 @@ if [[ "$BUNDLED_GOOGLE_CLIENT_ID" != *.apps.googleusercontent.com ]]; then
 fi
 cp assets/MenuCloak.icns "$APP/Contents/Resources/MenuCloak.icns"
 cp assets/MenuCloakMenuTemplate.png "$APP/Contents/Resources/MenuCloakMenuTemplate.png"
-swiftc -O -swift-version 5 main.swift -o "$APP/Contents/MacOS/MenuCloak"
+BUILD_DIR="$(mktemp -d)"
+cleanup() {
+  /usr/bin/trash "$BUILD_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+swiftc -O -swift-version 5 -target arm64-apple-macosx11.0 main.swift \
+  -o "$BUILD_DIR/MenuCloak-arm64"
+swiftc -O -swift-version 5 -target x86_64-apple-macosx11.0 main.swift \
+  -o "$BUILD_DIR/MenuCloak-x86_64"
+lipo -create "$BUILD_DIR/MenuCloak-arm64" "$BUILD_DIR/MenuCloak-x86_64" \
+  -output "$APP/Contents/MacOS/MenuCloak"
 codesign --force --sign - "$APP" 2>/dev/null || true
 echo "built $APP"

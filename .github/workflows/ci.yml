@@ -9,12 +9,30 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: raycast-extension/package-lock.json
       - name: Build MenuCloak
         run: ./build.sh
       - name: Run self-test
         run: ./MenuCloak.app/Contents/MacOS/MenuCloak --selftest
       - name: Verify app signature
         run: codesign --verify --deep --strict MenuCloak.app
+      - name: Verify supported Mac architectures
+        run: |
+          BINARY=MenuCloak.app/Contents/MacOS/MenuCloak
+          lipo -archs "$BINARY" | grep -q 'x86_64 arm64\|arm64 x86_64'
+          test "$(vtool -show-build "$BINARY" | grep -c 'minos 11.0')" -eq 2
+      - name: Verify prebuilt release installer
+        run: ./tests/test-prebuilt-installer.sh
+      - name: Verify unified release package
+        env:
+          MENUCLOAK_GOOGLE_CLIENT_ID: test.apps.googleusercontent.com
+          MENUCLOAK_GOOGLE_CLIENT_SECRET: ci-test-secret
+          MENUCLOAK_RELEASE_OUTPUT_DIR: ${{ runner.temp }}/menucloak-release
+        run: ./scripts/package-release.sh
 
   raycast-extension:
     runs-on: macos-15
