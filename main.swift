@@ -2024,7 +2024,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let overlayFrame = overlay.frame
         // On a notched display, keep the text entirely in the usable top-left area.
         // Without a notch, the label can use the whole cloak.
-        let safeMaxX = screen.auxiliaryTopLeftArea?.maxX ?? overlayFrame.maxX
+        let safeMaxX: CGFloat
+        if #available(macOS 12.0, *) {
+            safeMaxX = screen.auxiliaryTopLeftArea?.maxX ?? overlayFrame.maxX
+        } else {
+            safeMaxX = overlayFrame.maxX
+        }
         let maxX = min(overlayFrame.maxX - padding, safeMaxX - padding)
         let minX = overlayFrame.minX + padding
         focusLabel.frame = .init(

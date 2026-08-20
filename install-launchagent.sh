@@ -69,13 +69,59 @@ if [ "${1:-}" = "--selftest" ]; then
   exit 0
 fi
 
+USE_PREBUILT=false
+if [[ "${1:-}" == "--prebuilt" ]]; then
+  USE_PREBUILT=true
+  shift
+fi
+if [[ $# -ne 0 ]]; then
+  echo "usage: $0 [--prebuilt]" >&2
+  exit 2
+fi
+
 validate_install_source
-./build.sh
-APP="/Applications/MenuCloak.app"
-ditto "$(pwd)/MenuCloak.app" "$APP"
+SOURCE_APP="${MENUCLOAK_SOURCE_APP:-$(pwd)/MenuCloak.app}"
+if [[ "$USE_PREBUILT" == true ]]; then
+  if [[ ! -x "$SOURCE_APP/Contents/MacOS/MenuCloak" ]]; then
+    echo "menucloak: bundled MenuCloak.app is missing or incomplete" >&2
+    exit 1
+  fi
+  if ! plutil -extract MenuCloakGoogleClientSecret raw -o - \
+    "$SOURCE_APP/Contents/Info.plist" >/dev/null 2>&1; then
+    echo "menucloak: bundled app is not a Google-enabled release build" >&2
+    exit 1
+  fi
+  codesign --verify --deep --strict "$SOURCE_APP"
+  echo "menucloak: verified bundled release app"
+else
+  ./build.sh
+fi
+
+./scripts/install-raycast-extension.sh --preflight
+
+if [[ "${MENUCLOAK_INSTALL_DRY_RUN:-0}" == "1" ]]; then
+  echo "menucloak: install dry run passed"
+  exit 0
+fi
+
+./scripts/install-raycast-extension.sh
+
+if [[ -n "${MENUCLOAK_APPLICATIONS_DIR:-}" ]]; then
+  APPLICATIONS_DIR="$MENUCLOAK_APPLICATIONS_DIR"
+elif [[ -w /Applications ]] && \
+  { [[ ! -e /Applications/MenuCloak.app ]] || [[ -w /Applications/MenuCloak.app ]]; }; then
+  APPLICATIONS_DIR="/Applications"
+else
+  APPLICATIONS_DIR="$HOME/Applications"
+  echo "menucloak: using $APPLICATIONS_DIR for this standard user account"
+fi
+mkdir -p "$APPLICATIONS_DIR"
+APP="$APPLICATIONS_DIR/MenuCloak.app"
+ditto "$SOURCE_APP" "$APP"
 BIN="$APP/Contents/MacOS/MenuCloak"
-PLIST="$HOME/Library/LaunchAgents/com.dans.menucloak.plist"
-mkdir -p "$HOME/Library/LaunchAgents"
+LAUNCH_AGENTS_DIR="${MENUCLOAK_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+PLIST="$LAUNCH_AGENTS_DIR/com.dans.menucloak.plist"
+mkdir -p "$LAUNCH_AGENTS_DIR"
 plutil -create xml1 "$PLIST"
 plutil -insert Label -string com.dans.menucloak "$PLIST"
 plutil -insert ProgramArguments -array "$PLIST"
@@ -91,4 +137,3 @@ if ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
 fi
 echo "menucloak: installed app and login item"
-./scripts/install-raycast-extension.sh

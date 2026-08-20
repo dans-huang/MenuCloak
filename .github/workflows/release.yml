@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: raycast-extension/package-lock.json
+      - name: Verify release tag
+        run: |
+          APP_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - Info.plist)"
+          if [[ "$APP_VERSION" == *.*.* ]]; then
+            RELEASE_VERSION="$APP_VERSION"
+          else
+            RELEASE_VERSION="${APP_VERSION}.0"
+          fi
+          if [[ "$GITHUB_REF_NAME" != "v${RELEASE_VERSION}" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match app version v${RELEASE_VERSION}" >&2
+            exit 1
+          fi
+      - name: Build unified release archive
+        env:
+          MENUCLOAK_GOOGLE_CLIENT_SECRET: ${{ secrets.MENUCLOAK_GOOGLE_CLIENT_SECRET }}
+          MENUCLOAK_RELEASE_OUTPUT_DIR: ${{ runner.temp }}/menucloak-release
+        run: ./scripts/package-release.sh "${GITHUB_REF_NAME#v}"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARCHIVE="${RUNNER_TEMP}/menucloak-release/MenuCloak-${GITHUB_REF_NAME#v}.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ARCHIVE" \
+              --title "MenuCloak ${GITHUB_REF_NAME#v}" \
+              --generate-notes
+          fi

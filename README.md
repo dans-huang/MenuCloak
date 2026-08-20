@@ -53,10 +53,14 @@ it can't leave the right side visible).
 
 ## Install
 
-Download the latest `MenuCloak.zip` from [GitHub Releases](https://github.com/dans-huang/MenuCloak/releases),
-unzip it, and move the app to `/Applications`. The current community build is ad-hoc
-signed rather than Apple-notarized, so macOS may require right-clicking the app and
-choosing **Open** the first time.
+Download the latest `MenuCloak-<version>.zip` from
+[GitHub Releases](https://github.com/dans-huang/MenuCloak/releases), unzip it, and
+double-click **Install MenuCloak.command**. The one-pass installer puts the Google-enabled
+app in `/Applications`, starts it at login, and installs all five Raycast commands from
+the same download without requiring Node.js. Standard macOS accounts that cannot write
+to `/Applications` use `~/Applications` automatically. If Raycast is not installed, that part is skipped. The current
+community build is ad-hoc signed rather than Apple-notarized, so macOS may require
+right-clicking the installer or app and choosing **Open** the first time.
 
 To build from source instead, install the Xcode Command Line Tools and run:
 
@@ -113,11 +117,15 @@ and all five Raycast commands — run:
 ./install-launchagent.sh
 ```
 
+Official release archives run the same script with `--prebuilt`. That preserves the
+Google-enabled app bundled in the download instead of replacing it with a source build.
+
 The installer uses the official Raycast Store listing once it is available and
 opens Raycast for the one required installation confirmation. While Store review
-is pending, it builds and installs the identical extension from this repository
-when Node.js and npm are available. Set `MENUCLOAK_RAYCAST_MODE=skip` if you do
-not use Raycast, or use `local` / `store` to force either installation path.
+is pending, official release archives install their bundled compiled extension directly;
+source checkouts build the identical extension when Node.js and npm are available. Set
+`MENUCLOAK_RAYCAST_MODE=skip` if you do not use Raycast, or use `local` / `store` to
+force either installation path.
 
 ## Raycast
 
