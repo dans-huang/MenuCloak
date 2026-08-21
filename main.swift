@@ -1,11 +1,11 @@
-// MenuCloak — hides the app menus (left side of the menu bar) behind a black overlay.
+// MenuCloak — hides the app menus (left side of the menu bar) behind an adaptive overlay.
 // Right-side status items / clock stay visible. Move the mouse into the covered
 // area to reveal the menus; they re-cover when you leave.
 //
 // Technique (same family as MacTools' notch mask, unlike TopNotch's wallpaper repaint):
-// a borderless black NSWindow at status-window level, click-through, spanning from
-// the left screen edge to the leftmost status item. On a notched Mac the black
-// strip merges with the notch.
+// a borderless NSWindow at status-window level, click-through, spanning from
+// the left screen edge to the leftmost status item. The cloak uses the native
+// macOS 26 black surface and an appearance-adaptive semantic surface elsewhere.
 //
 // ponytail: primary display only; fullscreen Spaces stay uncovered (menu bar
 // auto-hides there anyway). Upgrade path: one overlay per NSScreen.
@@ -1087,6 +1087,102 @@ final class GlobalHotKey {
     }
 }
 
+enum CloakColorScheme: Equatable {
+    case light
+    case dark
+}
+
+enum CloakMenuBarSurface: Equatable {
+    case black
+    case appearanceAdaptive
+}
+
+struct CloakAppearanceInputs: Equatable {
+    let colorScheme: CloakColorScheme
+    let reduceTransparency: Bool
+    let increaseContrast: Bool
+    let menuBarSurface: CloakMenuBarSurface
+}
+
+struct CloakAppearanceStyle: Equatable {
+    let colorScheme: CloakColorScheme
+    let backgroundColor: NSColor
+    let foregroundColor: NSColor
+    let textOpacity: CGFloat
+}
+
+enum CloakAppearance {
+    static func colorScheme(for appearance: NSAppearance) -> CloakColorScheme {
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+    }
+
+    static func menuBarSurface(for version: OperatingSystemVersion) -> CloakMenuBarSurface {
+        // macOS 26's Liquid Glass menu bar is a solid black surface in both
+        // Light and Dark appearance. Other releases use the appearance-driven
+        // semantic fallback until their compositor is verified.
+        version.majorVersion == 26 ? .black : .appearanceAdaptive
+    }
+
+    static func resolve(_ inputs: CloakAppearanceInputs) -> CloakAppearanceStyle {
+        if inputs.menuBarSurface == .black {
+            return CloakAppearanceStyle(
+                colorScheme: inputs.colorScheme,
+                backgroundColor: .black,
+                foregroundColor: .selectedMenuItemTextColor,
+                textOpacity: inputs.increaseContrast ? 1 : 0.92
+            )
+        }
+        return CloakAppearanceStyle(
+            colorScheme: inputs.colorScheme,
+            // An opaque semantic surface is intentional: effect materials
+            // tested here left seams or exposed the menu labels beneath them.
+            backgroundColor: .windowBackgroundColor,
+            foregroundColor: .labelColor,
+            textOpacity: inputs.increaseContrast ? 1 : 0.92
+        )
+    }
+}
+
+final class CloakBackgroundView: NSVisualEffectView {
+    var onEffectiveAppearanceChange: (() -> Void)?
+    private let backgroundLayer = CALayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        state = .inactive
+        wantsLayer = true
+        layer?.addSublayer(backgroundLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backgroundLayer.frame = bounds
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        onEffectiveAppearanceChange?()
+    }
+
+    func apply(_ style: CloakAppearanceStyle) {
+        var resolvedBackground = NSColor.clear.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolvedBackground = style.backgroundColor.cgColor
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backgroundLayer.backgroundColor = resolvedBackground
+        CATransaction.commit()
+    }
+}
+
 final class OverlayTextView: NSView {
     var text = "" {
         didSet {
@@ -1101,6 +1197,12 @@ final class OverlayTextView: NSView {
             needsDisplay = true
         }
     }
+    var textOpacity: CGFloat = 0.92 {
+        didSet { needsDisplay = true }
+    }
+    var textColor: NSColor = .labelColor {
+        didSet { needsDisplay = true }
+    }
     private let signalLayer = CALayer()
 
     override init(frame frameRect: NSRect) {
@@ -1113,6 +1215,18 @@ final class OverlayTextView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
         setAccessibilityLabel("MenuCloak focus")
+    }
+
+    func refreshSemanticColors() {
+        var signalColor = NSColor.systemOrange.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            signalColor = NSColor.systemOrange.cgColor
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        signalLayer.backgroundColor = signalColor
+        CATransaction.commit()
+        needsDisplay = true
     }
 
     required init?(coder: NSCoder) {
@@ -1151,7 +1265,7 @@ final class OverlayTextView: NSView {
         paragraph.lineBreakMode = .byTruncatingTail
         let attributedText = NSAttributedString(string: text, attributes: [
             .font: NSFont.menuBarFont(ofSize: 0),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.9),
+            .foregroundColor: textColor.withAlphaComponent(textOpacity),
             .paragraphStyle: paragraph,
         ])
         let textHeight = ceil(attributedText.boundingRect(
@@ -1351,6 +1465,62 @@ enum SystemOverview {
 
 // --selftest: the one runnable check for the pure logic.
 if CommandLine.arguments.contains("--selftest") {
+    let lightAuto = CloakAppearance.resolve(.init(
+        colorScheme: .light, reduceTransparency: false, increaseContrast: false,
+        menuBarSurface: .appearanceAdaptive
+    ))
+    let darkAuto = CloakAppearance.resolve(.init(
+        colorScheme: .dark, reduceTransparency: false, increaseContrast: false,
+        menuBarSurface: .appearanceAdaptive
+    ))
+    precondition(lightAuto.colorScheme == .light && darkAuto.colorScheme == .dark)
+    precondition(lightAuto.backgroundColor == .windowBackgroundColor)
+    precondition(darkAuto.backgroundColor == .windowBackgroundColor)
+    precondition(lightAuto.foregroundColor == .labelColor)
+    let reducedTransparency = CloakAppearance.resolve(.init(
+        colorScheme: .light, reduceTransparency: true, increaseContrast: false,
+        menuBarSurface: .appearanceAdaptive
+    ))
+    precondition(reducedTransparency.backgroundColor == .windowBackgroundColor)
+    precondition(reducedTransparency.textOpacity == 0.92)
+    let increasedContrast = CloakAppearance.resolve(.init(
+        colorScheme: .dark, reduceTransparency: false, increaseContrast: true,
+        menuBarSurface: .appearanceAdaptive
+    ))
+    precondition(increasedContrast.textOpacity == 1)
+    let bothAccessibilityOptions = CloakAppearance.resolve(.init(
+        colorScheme: .light, reduceTransparency: true, increaseContrast: true,
+        menuBarSurface: .appearanceAdaptive
+    ))
+    precondition(bothAccessibilityOptions.textOpacity == 1)
+    let tahoeLight = CloakAppearance.resolve(.init(
+        colorScheme: .light, reduceTransparency: false, increaseContrast: false,
+        menuBarSurface: .black
+    ))
+    let tahoeAccessible = CloakAppearance.resolve(.init(
+        colorScheme: .dark, reduceTransparency: true, increaseContrast: true,
+        menuBarSurface: .black
+    ))
+    let tahoeReducedTransparency = CloakAppearance.resolve(.init(
+        colorScheme: .dark, reduceTransparency: true, increaseContrast: false,
+        menuBarSurface: .black
+    ))
+    precondition(tahoeLight.backgroundColor == .black)
+    precondition(tahoeLight.foregroundColor == .selectedMenuItemTextColor)
+    precondition(tahoeAccessible.backgroundColor == .black)
+    precondition(tahoeAccessible.textOpacity == 1)
+    precondition(tahoeReducedTransparency.textOpacity == 0.92)
+    precondition(CloakAppearance.menuBarSurface(for: .init(
+        majorVersion: 15, minorVersion: 7, patchVersion: 0
+    )) == .appearanceAdaptive)
+    precondition(CloakAppearance.menuBarSurface(for: .init(
+        majorVersion: 26, minorVersion: 0, patchVersion: 0
+    )) == .black)
+    precondition(CloakAppearance.menuBarSurface(for: .init(
+        majorVersion: 27, minorVersion: 0, patchVersion: 0
+    )) == .appearanceAdaptive)
+    precondition(CloakAppearance.colorScheme(for: NSAppearance(named: .aqua)!) == .light)
+    precondition(CloakAppearance.colorScheme(for: NSAppearance(named: .darkAqua)!) == .dark)
     precondition(Geometry.coverWidth(statusMinX: 900, screenWidth: 1512) == 900)
     precondition(Geometry.coverWidth(statusMinX: nil, screenWidth: 1512) == 1512 * 0.6)
     precondition(Geometry.coverWidth(statusMinX: 50, screenWidth: 1512) == 1512 * 0.6)
@@ -1505,6 +1675,7 @@ if CommandLine.arguments.contains("--selftest") {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate {
     private static let enabledDefaultsKey = "MenuCloakEnabled"
     private var overlay: NSWindow!
+    private var cloakBackground: CloakBackgroundView!
     private var focusLabel: OverlayTextView!
     private var statusItem: NSStatusItem!
     private var statusToggleItem: NSMenuItem!
@@ -1550,7 +1721,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in self?.refreshAndLayout() }
-        // the instant a desktop switch lands, snap to black — no fade, no blink
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in self?.applyCloakAppearance() }
+        // the instant a desktop switch lands, snap back covered — no fade, no blink
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil, queue: .main
@@ -1570,7 +1745,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         calendarMonitor.onConnectionStateChange = { [weak self] _ in
             self?.updateGoogleCalendarControl()
         }
-        calendarMonitor.start()
+        if ProcessInfo.processInfo.environment["MENUCLOAK_DEBUG"] != nil,
+           let debugReminderTitle = ProcessInfo.processInfo.environment["MENUCLOAK_DEBUG_REMINDER"],
+           !debugReminderTitle.isEmpty {
+            let now = Date()
+            let reminder = CalendarReminder(
+                title: debugReminderTitle,
+                startDate: now.addingTimeInterval(10 * 60),
+                endDate: now.addingTimeInterval(40 * 60),
+                location: "Room 3A",
+                meetURL: URL(string: "https://meet.google.com/abc-defg-hij")
+            )
+            activeCalendarReminders = [reminder]
+            setCalendarReminders([reminder])
+        } else {
+            calendarMonitor.start()
+        }
         openMeetHotKey = GlobalHotKey(
             keyCode: UInt32(kVK_ANSI_J),
             modifiers: UInt32(cmdKey | controlKey)
@@ -1624,19 +1814,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let w = NSWindow(contentRect: .init(x: 0, y: 0, width: 100, height: 24),
                          styleMask: .borderless, backing: .buffered, defer: false)
         w.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)))
-        w.backgroundColor = .black
-        w.isOpaque = true
+        w.backgroundColor = .clear
+        w.isOpaque = false
         w.hasShadow = false
         w.ignoresMouseEvents = true
         w.alphaValue = 0
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        let background = CloakBackgroundView(frame: w.contentView?.bounds ?? .zero)
+        background.autoresizingMask = [.width, .height]
         let label = OverlayTextView(frame: .zero)
         label.isHidden = true
-        w.contentView?.addSubview(label)
+        background.addSubview(label)
+        w.contentView = background
         w.orderFrontRegardless()
         overlay = w
+        cloakBackground = background
         focusLabel = label
+        background.onEffectiveAppearanceChange = { [weak self] in
+            self?.applyCloakAppearance()
+        }
+        applyCloakAppearance()
         bindToPrivateSpace(w)
+    }
+
+    private func applyCloakAppearance() {
+        guard let cloakBackground, let focusLabel else { return }
+        let workspace = NSWorkspace.shared
+        let inputs = CloakAppearanceInputs(
+            colorScheme: CloakAppearance.colorScheme(for: cloakBackground.effectiveAppearance),
+            reduceTransparency: workspace.accessibilityDisplayShouldReduceTransparency,
+            increaseContrast: workspace.accessibilityDisplayShouldIncreaseContrast,
+            menuBarSurface: CloakAppearance.menuBarSurface(
+                for: ProcessInfo.processInfo.operatingSystemVersion
+            )
+        )
+        let style = CloakAppearance.resolve(inputs)
+        cloakBackground.apply(style)
+        focusLabel.textColor = style.foregroundColor
+        focusLabel.textOpacity = style.textOpacity
+        focusLabel.refreshSemanticColors()
     }
 
     private func bindToPrivateSpace(_ w: NSWindow) {
@@ -2102,7 +2318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             return
         }
         guard let bh = menuBarH, bh > 5, let cw = coverWidth else {
-            // black by default: stay covered through transient probe gaps
+            // stay covered through transient probe gaps
             // (space-switch animations flap the window list for ≤0.4s);
             // uncover only when the menu bar stays gone (real fullscreen Space)
             if let m = missSince, Date().timeIntervalSince(m) > 0.8 {

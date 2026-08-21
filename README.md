@@ -4,11 +4,11 @@ Turn the unused left side of the macOS menu bar into a calm, persistent focus su
 
 [Website](https://dans-huang.github.io/MenuCloak/) · [Privacy](https://dans-huang.github.io/MenuCloak/privacy.html) · [Terms](https://dans-huang.github.io/MenuCloak/terms.html)
 
-Hides the **app menus in the macOS menu bar** behind a black overlay. The Apple menu
+Hides the **app menus in the macOS menu bar** behind an adaptive overlay. The Apple menu
 () stays visible and clickable; everything on the right — status items, Control
-Center, clock — stays visible. On a notched MacBook the black strip merges with the
-notch. `MENUCLOAK_LEFT` env tunes where the cover starts (default 46pt; 0 = cover the
-Apple menu too).
+Center, clock — stays visible. The cloak follows Light/Dark Mode and macOS accessibility
+display settings automatically, with no appearance setup. `MENUCLOAK_LEFT` env tunes
+where the cover starts (default 46pt; 0 = cover the Apple menu too).
 
 Move the mouse into the covered area and the menus reveal themselves; move away and
 they re-cover after 0.6s. Open menus keep it revealed.
@@ -34,11 +34,16 @@ The shortcut remains available until the meeting ends, even after its notice is 
 
 ## How it works
 
-A borderless, click-through black `NSWindow` at status-window level (25) — one level
-above the menu bar backdrop (24) — spanning from the left screen edge to the leftmost
-visible status item. Width and menu bar height are re-read from the window server every
-0.3s, so it adapts when status items appear/disappear or the frontmost app changes.
-No Accessibility / Screen Recording permissions needed.
+A borderless, click-through `NSWindow` at status-window level (25) — one level above
+the menu bar backdrop (24) — spanning from the left screen edge to the leftmost visible
+status item. The cloak uses the native black menu-bar surface on macOS 26 and an opaque
+AppKit semantic surface on other macOS releases. This deliberate solid treatment
+fully conceals the original app-menu labels; tested visual-effect materials left a seam
+or exposed the content below. Focus and Calendar text use semantic menu/label colors,
+and Increase Contrast raises text to full opacity. Changes apply live without relaunching.
+Width and menu bar height are re-read from the window server every 0.3s, so it adapts
+when status items appear/disappear or the frontmost app changes. No Accessibility /
+Screen Recording permissions needed.
 
 The window lives in its own private CGS space (`CGSSpaceCreate` +
 `CGSSpaceSetAbsoluteLevel`, the Übersicht/Pock recipe) pinned above the managed
@@ -152,7 +157,11 @@ fork or installing without a remote freshness check.
 
 ## Behavior details
 
-- **Black by default.** The cover holds through desktop/Space switches — transient
+- **Adaptive by default.** On macOS 26 the cover matches its native black menu-bar
+  surface in Light and Dark Mode. Other releases use AppKit's appearance-adaptive
+  opaque background. Reduce Transparency remains opaque, and Increase Contrast raises
+  text to full opacity, without manual configuration.
+  It holds through desktop/Space switches — transient
   window-server gaps during switch animations (measured ≤0.4s) never uncover it;
   the cover snaps back instantly (no fade) the moment a switch lands.
 - Mission Control: the cover hides while the overview is open and returns as soon
@@ -166,7 +175,12 @@ fork or installing without a remote freshness check.
 
 ## Known Limitations
 
-- Primary display only. Upgrade path: one overlay per `NSScreen`.
+- Primary display only. Simultaneous menu bars on multiple displays are not covered yet;
+  external-display appearance remains unverified on the current test machine.
+- Outside macOS 26, MenuCloak deliberately favors a fully opaque semantic
+  cover over translucent menu-bar matching so hidden app-menu labels cannot ghost
+  through. The boundary can therefore differ slightly from a translucent wallpaper-
+  tinted menu bar.
 - Keyboard-opened menus reveal with up to 0.5s delay.
 - The overlay uses private macOS window-server APIs. They can change in future macOS
   releases; MenuCloak falls back to a normal all-Spaces window if they are unavailable.
