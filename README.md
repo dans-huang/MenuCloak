@@ -36,11 +36,15 @@ The shortcut remains available until the meeting ends, even after its notice is 
 
 A borderless, click-through `NSWindow` at status-window level (25) — one level above
 the menu bar backdrop (24) — spanning from the left screen edge to the leftmost visible
-status item. The cloak uses the native black menu-bar surface on macOS 26 and an opaque
-AppKit semantic surface on other macOS releases. This deliberate solid treatment
-fully conceals the original app-menu labels; tested visual-effect materials left a seam
-or exposed the content below. Focus and Calendar text use semantic menu/label colors,
-and Increase Contrast raises text to full opacity. Changes apply live without relaunching.
+status item. A second click-through window at menu-bar level (24) continues the same
+surface beneath the right-side status items, which remain visible one level above it;
+this prevents colorful wallpapers from creating a seam across the menu bar. The cloak
+uses the native black menu-bar surface on macOS 26, switches to
+the matching opaque neutral surface for Reduce Transparency and Increase Contrast, and
+uses an opaque AppKit semantic surface on other macOS releases. This deliberate solid
+treatment fully conceals the original app-menu labels; tested visual-effect materials
+left a seam or exposed the content below. Focus and Calendar text use semantic menu/label
+colors, and Increase Contrast raises text to full opacity. Changes apply live without relaunching.
 Width and menu bar height are re-read from the window server every 0.3s, so it adapts
 when status items appear/disappear or the frontmost app changes. No Accessibility /
 Screen Recording permissions needed.
@@ -158,9 +162,12 @@ fork or installing without a remote freshness check.
 ## Behavior details
 
 - **Adaptive by default.** On macOS 26 the cover matches its native black menu-bar
-  surface in Light and Dark Mode. Other releases use AppKit's appearance-adaptive
-  opaque background. Reduce Transparency remains opaque, and Increase Contrast raises
-  text to full opacity, without manual configuration.
+  surface in normal Light and Dark Mode, plus the neutral Light/Dark surfaces used by
+  Reduce Transparency and Increase Contrast. Other releases use AppKit's appearance-
+  adaptive opaque background. Increase Contrast also raises text to full opacity,
+  without manual configuration.
+  The matching level-24 backdrop also extends beneath the right-side status items, so
+  colorful and high-contrast wallpapers cannot tint that half of the bar differently.
   It holds through desktop/Space switches — transient
   window-server gaps during switch animations (measured ≤0.4s) never uncover it;
   the cover snaps back instantly (no fade) the moment a switch lands.

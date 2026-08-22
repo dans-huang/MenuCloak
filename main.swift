@@ -1112,23 +1112,47 @@ struct CloakAppearanceStyle: Equatable {
 }
 
 enum CloakAppearance {
+    private static func accessibleMenuBarBackground(
+        colorScheme: CloakColorScheme,
+        increaseContrast: Bool
+    ) -> NSColor {
+        // macOS 26 replaces the normal black Liquid Glass menu bar with an
+        // opaque neutral surface when Reduce Transparency is enabled. These
+        // are the compositor's observed sRGB values; Clear/Tinted glass and
+        // desktop tinting do not change them in accessibility mode.
+        let component: CGFloat
+        switch (colorScheme, increaseContrast) {
+        case (.light, false): component = 218 / 255
+        case (.light, true): component = 230 / 255
+        case (.dark, false): component = 32 / 255
+        case (.dark, true): component = 45 / 255
+        }
+        return NSColor(srgbRed: component, green: component, blue: component, alpha: 1)
+    }
+
     static func colorScheme(for appearance: NSAppearance) -> CloakColorScheme {
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
     }
 
     static func menuBarSurface(for version: OperatingSystemVersion) -> CloakMenuBarSurface {
-        // macOS 26's Liquid Glass menu bar is a solid black surface in both
-        // Light and Dark appearance. Other releases use the appearance-driven
-        // semantic fallback until their compositor is verified.
+        // macOS 26's normal Liquid Glass menu bar is a solid black surface in
+        // both appearances; resolve() handles its opaque accessibility variants.
+        // Other releases use the semantic fallback until verified.
         version.majorVersion == 26 ? .black : .appearanceAdaptive
     }
 
     static func resolve(_ inputs: CloakAppearanceInputs) -> CloakAppearanceStyle {
         if inputs.menuBarSurface == .black {
+            let usesAccessibleSurface = inputs.reduceTransparency || inputs.increaseContrast
             return CloakAppearanceStyle(
                 colorScheme: inputs.colorScheme,
-                backgroundColor: .black,
-                foregroundColor: .selectedMenuItemTextColor,
+                backgroundColor: usesAccessibleSurface
+                    ? accessibleMenuBarBackground(
+                        colorScheme: inputs.colorScheme,
+                        increaseContrast: inputs.increaseContrast
+                    )
+                    : .black,
+                foregroundColor: usesAccessibleSurface ? .labelColor : .selectedMenuItemTextColor,
                 textOpacity: inputs.increaseContrast ? 1 : 0.92
             )
         }
@@ -1423,6 +1447,20 @@ enum Geometry {
         return x
     }
 
+    // Fill the native menu-bar backdrop underneath the right-side status items.
+    // Status items live one WindowServer level above this frame, so their icons
+    // stay visible while the wallpaper-tinted seam is removed.
+    static func statusBackdropFrame(screenFrame: CGRect, coverWidth: CGFloat,
+                                    barHeight: CGFloat) -> CGRect {
+        let minX = screenFrame.minX + coverWidth
+        return CGRect(
+            x: minX,
+            y: screenFrame.maxY - barHeight,
+            width: max(screenFrame.maxX - minX, 0),
+            height: barHeight
+        )
+    }
+
     // Mouse inside the covered strip (global bottom-left coords), with a little slack.
     static func isInStrip(mouse: CGPoint, screenTopY: CGFloat, barHeight: CGFloat, coverWidth: CGFloat) -> Bool {
         mouse.y >= screenTopY - barHeight - 4 && mouse.x <= coverWidth + 12
@@ -1501,14 +1539,31 @@ if CommandLine.arguments.contains("--selftest") {
         colorScheme: .dark, reduceTransparency: true, increaseContrast: true,
         menuBarSurface: .black
     ))
+    let tahoeLightAccessible = CloakAppearance.resolve(.init(
+        colorScheme: .light, reduceTransparency: true, increaseContrast: true,
+        menuBarSurface: .black
+    ))
     let tahoeReducedTransparency = CloakAppearance.resolve(.init(
         colorScheme: .dark, reduceTransparency: true, increaseContrast: false,
         menuBarSurface: .black
     ))
+    let tahoeLightReducedTransparency = CloakAppearance.resolve(.init(
+        colorScheme: .light, reduceTransparency: true, increaseContrast: false,
+        menuBarSurface: .black
+    ))
     precondition(tahoeLight.backgroundColor == .black)
     precondition(tahoeLight.foregroundColor == .selectedMenuItemTextColor)
-    precondition(tahoeAccessible.backgroundColor == .black)
+    func srgbComponent255(_ color: NSColor) -> Int {
+        let srgb = color.usingColorSpace(.sRGB)!
+        return Int((srgb.redComponent * 255).rounded())
+    }
+    precondition(srgbComponent255(tahoeLightReducedTransparency.backgroundColor) == 218)
+    precondition(srgbComponent255(tahoeLightAccessible.backgroundColor) == 230)
+    precondition(srgbComponent255(tahoeReducedTransparency.backgroundColor) == 32)
+    precondition(srgbComponent255(tahoeAccessible.backgroundColor) == 45)
+    precondition(tahoeAccessible.foregroundColor == .labelColor)
     precondition(tahoeAccessible.textOpacity == 1)
+    precondition(tahoeReducedTransparency.foregroundColor == .labelColor)
     precondition(tahoeReducedTransparency.textOpacity == 0.92)
     precondition(CloakAppearance.menuBarSurface(for: .init(
         majorVersion: 15, minorVersion: 7, patchVersion: 0
@@ -1524,6 +1579,11 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(Geometry.coverWidth(statusMinX: 900, screenWidth: 1512) == 900)
     precondition(Geometry.coverWidth(statusMinX: nil, screenWidth: 1512) == 1512 * 0.6)
     precondition(Geometry.coverWidth(statusMinX: 50, screenWidth: 1512) == 1512 * 0.6)
+    precondition(Geometry.statusBackdropFrame(
+        screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+        coverWidth: 900,
+        barHeight: 38
+    ) == CGRect(x: 900, y: 944, width: 612, height: 38))
     precondition(Geometry.coverWidth(statusMinX: 2000, screenWidth: 1512) == 1512 * 0.6)
     precondition(Geometry.isInStrip(mouse: .init(x: 100, y: 978), screenTopY: 982, barHeight: 37, coverWidth: 800))
     precondition(!Geometry.isInStrip(mouse: .init(x: 100, y: 500), screenTopY: 982, barHeight: 37, coverWidth: 800))
@@ -1675,7 +1735,9 @@ if CommandLine.arguments.contains("--selftest") {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate {
     private static let enabledDefaultsKey = "MenuCloakEnabled"
     private var overlay: NSWindow!
+    private var statusBackdrop: NSWindow!
     private var cloakBackground: CloakBackgroundView!
+    private var statusBackdropBackground: CloakBackgroundView!
     private var focusLabel: OverlayTextView!
     private var statusItem: NSStatusItem!
     private var statusToggleItem: NSMenuItem!
@@ -1811,6 +1873,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var cgsSpace: CGSSpaceID = 0
 
     private func makeOverlay() {
+        let backdrop = NSWindow(contentRect: .init(x: 0, y: 0, width: 100, height: 24),
+                                styleMask: .borderless, backing: .buffered, defer: false)
+        backdrop.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)))
+        backdrop.backgroundColor = .clear
+        backdrop.isOpaque = false
+        backdrop.hasShadow = false
+        backdrop.ignoresMouseEvents = true
+        backdrop.alphaValue = 0
+        backdrop.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        let backdropBackground = CloakBackgroundView(frame: backdrop.contentView?.bounds ?? .zero)
+        backdropBackground.autoresizingMask = [.width, .height]
+        backdrop.contentView = backdropBackground
+        backdrop.orderFrontRegardless()
+
         let w = NSWindow(contentRect: .init(x: 0, y: 0, width: 100, height: 24),
                          styleMask: .borderless, backing: .buffered, defer: false)
         w.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)))
@@ -1828,7 +1904,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         w.contentView = background
         w.orderFrontRegardless()
         overlay = w
+        statusBackdrop = backdrop
         cloakBackground = background
+        statusBackdropBackground = backdropBackground
         focusLabel = label
         background.onEffectiveAppearanceChange = { [weak self] in
             self?.applyCloakAppearance()
@@ -1850,6 +1928,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         )
         let style = CloakAppearance.resolve(inputs)
         cloakBackground.apply(style)
+        statusBackdropBackground.apply(style)
         focusLabel.textColor = style.foregroundColor
         focusLabel.textOpacity = style.textOpacity
         focusLabel.refreshSemanticColors()
@@ -1924,6 +2003,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             setCovered(!missionControlActive, animate: false)
         } else {
             setCovered(false, animate: false)
+            setStatusBackdropVisible(false)
         }
     }
 
@@ -2232,7 +2312,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         guard let s = screen, let cw = coverWidth, let bh = menuBarH, bh > 5 else { return }
         overlay.setFrame(.init(x: s.frame.minX + leftInset, y: s.frame.maxY - bh,
                                width: max(cw - leftInset, 0), height: bh), display: true)
+        statusBackdrop.setFrame(
+            Geometry.statusBackdropFrame(screenFrame: s.frame, coverWidth: cw, barHeight: bh),
+            display: true
+        )
+        setStatusBackdropVisible(enabled && !missionControlActive)
         layoutFocusText(on: s, barHeight: bh)
+    }
+
+    private func setStatusBackdropVisible(_ visible: Bool) {
+        statusBackdrop.alphaValue = visible ? 1 : 0
     }
 
     private func layoutFocusText(on screen: NSScreen, barHeight: CGFloat) {
@@ -2305,7 +2394,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
 
     private func tick() {
-        guard enabled, let s = screen else { setCovered(false, animate: false); return }
+        guard enabled, let s = screen else {
+            setCovered(false, animate: false)
+            setStatusBackdropVisible(false)
+            return
+        }
         tickCount += 1
         if tickCount % 10 == 0 {
             setCalendarReminders(CalendarReminderLogic.visible(activeCalendarReminders, now: Date()))
@@ -2315,6 +2408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         }   // 0.3s probe cadence
         if missionControlActive {
             setCovered(false, animate: false)
+            setStatusBackdropVisible(false)
             return
         }
         guard let bh = menuBarH, bh > 5, let cw = coverWidth else {
@@ -2323,9 +2417,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             // uncover only when the menu bar stays gone (real fullscreen Space)
             if let m = missSince, Date().timeIntervalSince(m) > 0.8 {
                 setCovered(false, animate: false)
+                setStatusBackdropVisible(false)
             }
             return
         }
+        setStatusBackdropVisible(true)
         // menu-open probe: every tick while revealed, every 0.5s while covered
         // (catches keyboard-opened menus without a 10Hz window-list scan)
         let hold = Geometry.isInStrip(mouse: NSEvent.mouseLocation, screenTopY: s.frame.maxY,
